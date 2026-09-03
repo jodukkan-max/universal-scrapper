@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "Universal Scrapper",
+  "version": "1.0.9",
+  "description": "Scrape cosmetics product pages into WooCommerce-ready rows and import them to your stores.",
+  "permissions": ["sidePanel", "storage", "scripting", "activeTab", "tabs"],
+  "host_permissions": ["<all_urls>"],
+  "background": { "service_worker": "background.js" },
+  "side_panel": { "default_path": "sidepanel.html" },
+  "action": { "default_title": "Open Universal Scrapper" }
+}

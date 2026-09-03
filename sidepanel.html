@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Universal Scrapper</title>
+  <link rel="stylesheet" href="sidepanel.css" />
+</head>
+<body>
+  <header class="sp-header">
+    <div class="sp-tabs">
+      <button id="tab-products" class="sp-tab active" data-tab="products">Products</button>
+      <button id="tab-stores" class="sp-tab" data-tab="stores">Stores</button>
+      <button id="tab-websites" class="sp-tab" data-tab="websites">Websites</button>
+    </div>
+  </header>
+
+  <!-- Products panel -->
+  <section id="panel-products" class="sp-panel">
+    <div id="hero">
+      <h2 id="hero-title" class="hero-title">Scrape Any Ecommerce Website!</h2>
+      <div id="hero-controls">
+        <div id="hero-buttons">
+          <button id="scrape-variable-btn" class="primary-btn hidden">Scrape variable product</button>
+          <button id="scrape-simple-btn" class="primary-btn hidden">Scrape simple product</button>
+          <button id="add-variable-btn" class="secondary-btn hidden">Add variable Scrapper</button>
+          <button id="add-simple-btn" class="secondary-btn hidden">Add simple Scrapper</button>
+          <button id="add-scraper-btn" class="primary-btn hidden">Add Scrapper</button>
+        </div>
+        <div id="type-selector" class="type-selector hidden">
+          <div class="type-selector-q">Is this a simple or variable product?</div>
+          <div class="type-selector-actions">
+            <button id="type-simple-btn" class="secondary-btn">Simple</button>
+            <button id="type-variable-btn" class="secondary-btn">Variable</button>
+          </div>
+        </div>
+        <div id="status" class="status hidden"></div>
+      </div>
+      <div id="agent-working" class="agent-working hidden">
+        <div id="agent-thought" class="agent-thought hidden"></div>
+        <div id="scrape-bar" class="scrape-bar"><div class="scrape-bar-fill"></div></div>
+        <button id="agent-cancel-btn" class="secondary-btn agent-cancel">Cancel</button>
+      </div>
+    </div>
+    <div id="type-badge" class="type-badge hidden"></div>
+
+    <!-- Results table -->
+    <div id="results" class="results hidden">
+      <div class="results-head">
+        <span id="result-count" class="muted"></span>
+      </div>
+      <div class="results-actions">
+        <button id="copy-btn">Copy</button>
+        <button id="csv-btn">CSV</button>
+        <button id="import-btn" class="woo-btn">Import</button>
+      </div>
+
+      <div id="import-box" class="import-box hidden">
+        <div class="import-box-head">Import to store(s):</div>
+        <div id="store-select" class="store-select"></div>
+        <label class="resize-toggle" style="display:flex;align-items:center;gap:6px;padding:8px 0;">
+          <input type="checkbox" id="resize-cb" checked> Resize images
+        </label>
+        <button id="do-import-btn" class="woo-btn">Import to selected</button>
+        <div id="import-status" class="status hidden"></div>
+      </div>
+
+      <div class="table-wrap">
+        <table id="data-table"><thead id="thead"></thead><tbody id="tbody"></tbody></table>
+      </div>
+    </div>
+
+    <!-- AI chat + save, for AI-generated scrapers -->
+    <div id="chat-panel" class="chat-panel hidden">
+      <div class="chat-title">Talk to the AI about the data</div>
+      <div id="chat-messages" class="chat-messages"></div>
+      <div class="chat-input-row">
+        <input id="chat-input" type="text" placeholder="e.g. prices are wrong / missing variants" autocomplete="off" />
+        <button id="chat-send-btn">Send</button>
+      </div>
+      <div id="chat-status" class="status hidden"></div>
+    </div>
+    <div id="save-row" class="save-row hidden">
+      <button id="cancel-scraper-btn" class="secondary-btn">Cancel</button>
+      <button id="add-to-scrapers-btn" class="primary-btn">Add to scrappers</button>
+    </div>
+
+    <!-- Site notes: your experience with the AI agent + pitfalls it falls into -->
+    <div id="notes-section" class="notes-section">
+      <button id="notes-toggle" class="notes-toggle" type="button">
+        <span class="notes-title">Notes</span>
+        <span id="notes-domain" class="notes-domain muted"></span>
+        <span id="notes-chevron" class="notes-chevron">▾</span>
+      </button>
+      <div id="notes-body" class="notes-body hidden">
+        <textarea id="notes-input" placeholder="Write your experience with the AI agent and any pitfalls it falls into on this site…"></textarea>
+        <div id="notes-status" class="notes-status muted"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Stores panel -->
+  <section id="panel-stores" class="sp-panel hidden">
+    <div class="store-form">
+      <input type="text" id="store-name" placeholder="Store name" />
+      <input type="url" id="store-url" placeholder="https://store.com" />
+      <input type="text" id="store-authkey" placeholder="Auth key (4-digit)" autocomplete="off" />
+      <div class="store-form-actions">
+        <button id="store-save-btn" class="primary-btn">Save store</button>
+        <button id="store-cancel-btn" class="hidden">Cancel</button>
+      </div>
+      <div id="store-form-status" class="status hidden"></div>
+    </div>
+    <ul id="store-list" class="store-list"></ul>
+  </section>
+
+  <!-- Websites panel -->
+  <section id="panel-websites" class="sp-panel hidden">
+    <div class="brands">
+      <ul id="brands-list" class="brands-list"></ul>
+    </div>
+  </section>
+
+  <script src="brands.js"></script>
+  <script src="supabase.js"></script>
+  <script src="sidepanel.js"></script>
+</body>
+</html>
