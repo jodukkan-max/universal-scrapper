@@ -29,6 +29,9 @@ body { margin: 0; font-family: 'Montserrat', -apple-system, BlinkMacSystemFont, 
 .sp-tab { flex: 1; background: var(--surface); border: 1px solid var(--border); color: var(--muted);
   border-radius: var(--radius); padding: 7px; font-weight: 500; cursor: pointer; font-size: 13px; }
 .sp-tab.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+.sp-header-meta { display: flex; justify-content: flex-end; margin-top: 6px; }
+.version-badge { font-size: 10px; color: var(--muted); padding: 2px 7px; border: 1px solid var(--border);
+  border-radius: 999px; background: var(--surface); }
 .sp-panel { padding: 12px 14px 24px; }
 .hidden { display: none !important; }
 .muted { color: var(--muted); }
@@ -199,23 +202,32 @@ body { margin: 0; font-family: 'Montserrat', -apple-system, BlinkMacSystemFont, 
 .save-row { display: flex; gap: 8px; margin-top: 12px; }
 .save-row .primary-btn, .save-row .secondary-btn { flex: 1; width: auto; }
 
+/* ── Deep re-analysis ("Data is not correct?") ──────────── */
+.deep-think { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; padding: 12px;
+  border: 1px dashed var(--border); border-radius: var(--radius); background: var(--surface); }
+.deep-think-label { font-size: 13px; font-weight: 500; color: var(--text); }
+.deep-think .secondary-btn { width: 100%; }
+
+/* ── Conversational chat (fix the scraped data) ─────────── */
+.chat-panel { margin-top: 14px; background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 12px; }
+.chat-title { font-size: 13px; font-weight: 500; color: var(--text); margin-bottom: 10px; }
+.chat-messages { display: flex; flex-direction: column; gap: 8px; max-height: 260px; overflow-y: auto; margin-bottom: 10px; }
+.chat-msg { display: flex; }
+.chat-msg.user { justify-content: flex-end; }
+.chat-msg.agent { justify-content: flex-start; }
+.chat-bubble { max-width: 85%; padding: 8px 10px; border-radius: 10px; font-size: 12px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
+.chat-msg.user .chat-bubble { background: var(--accent); color: #fff; border-bottom-right-radius: 3px; }
+.chat-msg.agent .chat-bubble { background: var(--surface2); color: var(--text); border-bottom-left-radius: 3px; }
+.chat-input-row { display: flex; gap: 6px; }
+.chat-input-row input { flex: 1; background: var(--bg); border: 1px solid var(--border); color: var(--text);
+  border-radius: var(--radius); padding: 8px 10px; font-family: inherit; font-size: 12px; }
+.chat-input-row input:focus { outline: none; border-color: var(--accent); }
+.chat-input-row button { background: var(--accent); color: #fff; border: none; border-radius: var(--radius);
+  padding: 0 14px; cursor: pointer; font-family: inherit; font-size: 12px; }
+.chat-input-row button:hover { background: var(--accent-hover); }
+.chat-input-row button:disabled { opacity: .5; cursor: not-allowed; }
+
 /* ── Cancel while the AI is working ─────────────────────── */
 .agent-cancel { width: 100%; margin-top: 10px; }
-
-/* ── Site notes (per-domain, persistent) ────────────────── */
-.notes-section { margin-top: 16px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); overflow: hidden; }
-.notes-toggle { display: flex; align-items: center; gap: 8px; width: 100%; padding: 10px 12px;
-  background: transparent; border: none; color: var(--text); cursor: pointer; font-family: inherit; font-size: 13px; }
-.notes-toggle:hover { background: var(--surface2); }
-.notes-title { font-weight: 500; }
-.notes-domain { font-size: 11px; flex: 1; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.notes-chevron { font-size: 11px; color: var(--muted); transition: transform .15s ease; }
-.notes-section.open .notes-chevron { transform: rotate(180deg); }
-.notes-body { padding: 0 12px 12px; }
-.notes-body textarea { width: 100%; min-height: 110px; resize: vertical; background: var(--bg);
-  border: 1px solid var(--border); color: var(--text); border-radius: var(--radius);
-  padding: 9px 10px; font-family: inherit; font-size: 12px; line-height: 1.5; }
-.notes-body textarea:focus { outline: none; border-color: var(--accent); }
-.notes-status { font-size: 11px; margin-top: 6px; }
-.notes-status.saved { color: var(--ok); }
 

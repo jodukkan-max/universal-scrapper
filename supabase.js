@@ -106,7 +106,7 @@
   async function deepseek(messages, opts = {}) {
     return rest('/functions/v1/deepseek', {
       method: 'POST',
-      body: { messages, json: !!opts.json },
+      body: { messages, json: !!opts.json, thinking: !!opts.thinking },
       // Under Supabase's 150s wall-clock limit; abort a bit early so the user
       // sees a clear timeout instead of an opaque 546/504.
       timeoutMs: opts.timeoutMs || 120000,

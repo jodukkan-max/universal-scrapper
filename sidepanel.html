@@ -13,6 +13,7 @@
       <button id="tab-stores" class="sp-tab" data-tab="stores">Stores</button>
       <button id="tab-websites" class="sp-tab" data-tab="websites">Websites</button>
     </div>
+    <div class="sp-header-meta"><span id="version-badge" class="version-badge"></span></div>
   </header>
 
   <!-- Products panel -->
@@ -70,33 +71,27 @@
       </div>
     </div>
 
-    <!-- AI chat + save, for AI-generated scrapers -->
-    <div id="chat-panel" class="chat-panel hidden">
-      <div class="chat-title">Talk to the AI about the data</div>
-      <div id="chat-messages" class="chat-messages"></div>
-      <div class="chat-input-row">
-        <input id="chat-input" type="text" placeholder="e.g. prices are wrong / missing variants" autocomplete="off" />
-        <button id="chat-send-btn">Send</button>
-      </div>
-      <div id="chat-status" class="status hidden"></div>
-    </div>
+    <!-- Save row, for AI-generated scrapers -->
     <div id="save-row" class="save-row hidden">
       <button id="cancel-scraper-btn" class="secondary-btn">Cancel</button>
       <button id="add-to-scrapers-btn" class="primary-btn">Add to scrappers</button>
     </div>
-
-    <!-- Site notes: your experience with the AI agent + pitfalls it falls into -->
-    <div id="notes-section" class="notes-section">
-      <button id="notes-toggle" class="notes-toggle" type="button">
-        <span class="notes-title">Notes</span>
-        <span id="notes-domain" class="notes-domain muted"></span>
-        <span id="notes-chevron" class="notes-chevron">▾</span>
-      </button>
-      <div id="notes-body" class="notes-body hidden">
-        <textarea id="notes-input" placeholder="Write your experience with the AI agent and any pitfalls it falls into on this site…"></textarea>
-        <div id="notes-status" class="notes-status muted"></div>
-      </div>
+    <!-- Deep re-analysis for AI-generated scrapers -->
+    <div id="deep-think" class="deep-think hidden">
+      <div class="deep-think-label">Data is not correct?</div>
+      <button id="deep-think-btn" class="secondary-btn">Use deep thinking</button>
     </div>
+    <!-- Conversational chat to fix the scraped data -->
+    <div id="chat-panel" class="chat-panel hidden">
+      <div class="chat-title">Chat with the AI about the data</div>
+      <div id="chat-messages" class="chat-messages"></div>
+      <div class="chat-input-row">
+        <input id="chat-input" type="text" placeholder="Tell me what's wrong (e.g. price is wrong / missing variants)" autocomplete="off" />
+        <button id="chat-send-btn">Send</button>
+      </div>
+      <div id="chat-status" class="status hidden"></div>
+    </div>
+
   </section>
 
   <!-- Stores panel -->

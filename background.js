@@ -4,7 +4,7 @@
 
 importScripts('supabase.js');
 
-console.log('[Universal Scrapper] service worker v1.0.3 started');
+console.log('[Universal Scrapper] service worker v' + (chrome.runtime.getManifest().version || '?') + ' started');
 
 // Open the side panel when the toolbar icon is clicked.
 chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
@@ -28,6 +28,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     try {
       if (msg.type === 'scrape') sendResponse(await handleScrape(msg));
       else if (msg.type === 'generateScraper') sendResponse(await generateScraper(msg));
+      else if (msg.type === 'deepReanalyze') sendResponse(await deepReanalyze(msg));
       else if (msg.type === 'chatFixScraper') sendResponse(await chatFixScraper(msg));
       else if (msg.type === 'saveScraper') sendResponse(await saveScraper(msg));
       else if (msg.type === 'cancelGenerate') { cancelRequested = true; if (currentGenAbort) currentGenAbort.abort(); sendResponse({ ok: true }); }
@@ -134,8 +135,8 @@ async function wcImport({ store, authKey, csv, skipResize }) {
 // in the function secret, never in the extension).
 const DS_FLASH = 'deepseek-v4-flash';
 
-async function callDeepSeek(messages, { json, onReasoning, signal } = {}) {
-  const res = await self.Supabase.deepseek(messages, { json, signal });
+async function callDeepSeek(messages, { json, onReasoning, signal, thinking, timeoutMs } = {}) {
+  const res = await self.Supabase.deepseek(messages, { json, signal, thinking, timeoutMs });
   if (res.cancelled) { const e = new Error('cancelled'); e.cancelled = true; throw e; }
   if (!res.ok) throw new Error(res.error || ('DeepSeek HTTP ' + res.status));
   const data = res.data || {};
@@ -187,16 +188,52 @@ function decodeEntities(s){ return String(s==null?'':s)
 function normalizeShopUrl(src){ if(!src) return ''; const s=String(src).trim(); if(s.indexOf('$')>=0||s.indexOf('{')>=0||s.indexOf('}')>=0) return ''; const abs=s.startsWith('//')?'https:'+s:s; return abs.split('?')[0]; }
 function ldBlocks(html){ return [...String(html||'').matchAll(/<script[^>]*application\\/ld\\+json[^>]*>([\\s\\S]*?)<\\/script>/g)].map(m=>m[1]); }
 const fmtPrice = p => { const n = parseFloat(p); return isFinite(n) ? n.toFixed(2) : ''; };
-function simpleRow(o){ return [{ SKU: o.sku||'', Name: o.name||'', Description: o.description||'', 'Short Description': o.shortDesc||'', 'Regular Price': o.regularPrice||o.price||'', Categories: o.categories||'', Images: o.images||[] }]; }
-function variableRows(title, parentImages, description, shortDesc, categories, optionName, variants, optionName2){
+function simpleRow(o){ return [{ SKU: o.sku||'', Name: o.name||'', Description: o.description||'', 'Short Description': '', 'Regular Price': o.regularPrice||o.price||'', Categories: o.categories||'', Images: o.images||[] }]; }
+function variableRows(title, parentImages, description, categories, optionName, variants, optionName2){
   optionName2=optionName2||''; const rows=[]; let rowId=1;
   const a1=[...new Set((variants||[]).map(v=>v.name).filter(Boolean))].join(',');
   const a2=[...new Set((variants||[]).map(v=>v.name2).filter(Boolean))].join(',');
-  rows.push({ ID:rowId++, Parent:'', Type:'variable', SKU:'', Name:title, Images:(parentImages||[]).slice(0,4), 'Rey Variations extra images':'', Description:description||'', 'Short Description':shortDesc||'', Categories:categories||'', 'Regular Price':'', 'Attribute 1 name':optionName, 'Attribute 1 value(s)':a1, 'Attribute 1 visible':'1', 'Attribute 1 global':'1', 'Attribute 2 name':optionName2, 'Attribute 2 value(s)':a2, 'Attribute 2 visible':optionName2?'1':'', 'Attribute 2 global':optionName2?'1':'', 'Color Code':'' });
+  rows.push({ ID:rowId++, Parent:'', Type:'variable', SKU:'', Name:title, Images:(parentImages||[]).slice(0,4), 'Rey Variations extra images':'', Description:description||'', 'Short Description':'', Categories:categories||'', 'Regular Price':'', 'Attribute 1 name':optionName, 'Attribute 1 value(s)':a1, 'Attribute 1 visible':'1', 'Attribute 1 global':'1', 'Attribute 2 name':optionName2, 'Attribute 2 value(s)':a2, 'Attribute 2 visible':optionName2?'1':'', 'Attribute 2 global':optionName2?'1':'', 'Color Code':'' });
   const parentId=rowId-1;
   for(const v of variants){ rows.push({ ID:rowId++, Parent:'id:'+parentId, Type:'variation', SKU:v.sku||'', Name:title, Images:(v.images&&v.images.length)?[v.images[0]]:[], 'Rey Variations extra images':(v.extras&&v.extras.length)?v.extras:[], Description:'', 'Short Description':'', Categories:'', 'Regular Price':v.regularPrice||'', 'Attribute 1 name':optionName, 'Attribute 1 value(s)':v.name||'', 'Attribute 1 visible':'', 'Attribute 1 global':'1', 'Attribute 2 name':optionName2, 'Attribute 2 value(s)':v.name2||'', 'Attribute 2 visible':'', 'Attribute 2 global':optionName2?'1':'', 'Color Code':v.colorCode||'' }); }
   return rows;
 }
+// Deterministic JSON-LD reader. JSON-LD is on nearly every e-commerce page, so
+// this is a reliable, instant core-extractor that the generator runs FIRST (the
+// AI only fills in what JSON-LD doesn't provide, e.g. variants/swatches). It
+// walks the JSON-LD graph to find the Product node (including @graph nesting).
+function jsonLdCore(ctx, type){
+  const html = ctx.mainHtml || '';
+  const blocks = ldBlocks(html).map(function(s){ try { return JSON.parse(s); } catch(e){ return null; } }).filter(Boolean);
+  let product = null;
+  const find = function(node){
+    if (!node || typeof node !== 'object' || product) return;
+    const t = node['@type'];
+    if (t === 'Product' || (Array.isArray(t) && t.indexOf('Product') >= 0)) { product = node; return; }
+    const g = node['@graph'];
+    if (Array.isArray(g)) { for (let i = 0; i < g.length && !product; i++) find(g[i]); }
+  };
+  for (let i = 0; i < blocks.length && !product; i++) find(blocks[i]);
+  if (!product) return { rows: [], title: '' };
+  const name = product.name || '';
+  const desc = String(product.description || '').replace(/<[^>]*>/g, ' ').replace(/\\s+/g, ' ').trim();
+  const rawImgs = Array.isArray(product.image) ? product.image : (product.image ? [product.image] : []);
+  const imgs = rawImgs.map(normalizeShopUrl).filter(Boolean).slice(0, 4);
+  const sku = product.sku || product.mpn || '';
+  const offer = Array.isArray(product.offers) ? product.offers[0] : product.offers;
+  const price = (offer && (offer.price || offer.lowPrice)) ? String(offer.price || offer.lowPrice) : '';
+  const cats = Array.isArray(product.category) ? product.category.join(', ') : (product.category || '');
+  if (type === 'simple') {
+    return { rows: simpleRow({ sku: sku, name: name, description: desc, regularPrice: price ? fmtPrice(price) : '', categories: cats, images: imgs }), title: name };
+  }
+  return { rows: variableRows(name, imgs, desc, cats, 'Option', [], ''), title: name };
+}
+// Defensive sanitization shims. Some older AI-generated scrapers (or scrapers
+// saved by earlier builds) reference sanitizeRows(...) / cleanImageList(...)
+// directly. These are defined here so such code still runs instead of throwing
+// "sanitizeRows is not defined".
+function cleanImageList(arr){ if(!Array.isArray(arr)) return []; return arr.map(function(u){ return String(u==null?'':u).trim(); }).filter(function(u){ return u!=='' && u.indexOf('$')<0 && u.indexOf('{')<0 && u.indexOf('}')<0 && (u.indexOf('http://')===0 || u.indexOf('https://')===0 || u.indexOf('//')===0 || u.indexOf('data:')===0); }); }
+function sanitizeRows(rows){ if(!Array.isArray(rows)) return []; if(rows.some(function(r){ return Array.isArray(r); })){ var f=[]; for(var i=0;i<rows.length;i++){ if(Array.isArray(rows[i])) f=f.concat(rows[i]); else f.push(rows[i]); } rows=f; } return rows.map(function(r){ if(!r || typeof r!=='object') return r; var c=Object.assign({},r); if(Array.isArray(c.Images)) c.Images=cleanImageList(c.Images); if(Array.isArray(c['Rey Variations extra images'])) c['Rey Variations extra images']=cleanImageList(c['Rey Variations extra images']); return c; }); }
 `;
 
 function buildScraperBody(runBody) {
@@ -261,13 +298,36 @@ async function predefinedBody() {
 }
 
 // Compact but structured page sample for the generator: title + og meta +
-// JSON-LD + tag-preserving HTML (scripts/styles stripped).
+// JSON-LD + INLINE JSON (Next.js __NEXT_DATA__, ShopifyAnalytics, window state,
+// "var product = {...}", "data-product_variations", etc.) + a window of visible
+// HTML. The inline JSON is where modern stores actually keep product data, so it
+// is CRITICAL that we do NOT strip it — the old code removed every <script> and
+// starved the model of the very data it was told to read.
 function scraperHtmlSample(html) {
   const h = String(html || '');
   const lds = [...h.matchAll(/<script[^>]*application\/ld\+json[^>]*>([\s\S]*?)<\/script>/gi)].map(m => m[1]).join('\n---\n');
   const title = (h.match(/<title[^>]*>([\s\S]*?)<\/title>/i) || [])[1] || '';
   const og = [...h.matchAll(/<meta[^>]*property="og:([^"]+)"[^>]*content="([^"]*)"[^>]*>/gi)].map(m => 'og:' + m[1] + '=' + m[2]).join('\n');
   const ogTitle = (h.match(/<meta[^>]*property="og:title"[^>]*content="([^"]*)"[^>]*>/i) || [])[1] || '';
+
+  // Preserve data-bearing inline <script> bodies (NOT JSON-LD — those are above).
+  // Heuristic: keep scripts whose content looks like JSON / a product-state
+  // assignment; skip trackers, bundles, and empty scripts.
+  const inlineJson = [];
+  const scriptRe = /<script\b[^>]*>([\s\S]*?)<\/script>/gi;
+  let sm, budget = 24000;
+  while ((sm = scriptRe.exec(h)) && budget > 0) {
+    const openTag = sm[0].slice(0, 200);
+    if (/application\/ld\+json/i.test(openTag)) continue;
+    const inner = sm[1].trim();
+    if (!inner || inner.length < 8) continue;
+    if (/^[{\[]|"product"|"variants"|"offers"|__NEXT_DATA__|__INITIAL_STATE__|ShopifyAnalytics|product_variations|var\s+product|window\.__|dataLayer/i.test(inner)) {
+      const chunk = inner.slice(0, Math.min(inner.length, budget, 12000));
+      inlineJson.push(chunk);
+      budget -= chunk.length;
+    }
+  }
+
   const stripped = h
     .replace(/<script[\s\S]*?<\/script>/gi, ' ')
     .replace(/<style[\s\S]*?<\/style>/gi, ' ')
@@ -294,111 +354,174 @@ function scraperHtmlSample(html) {
     ? stripped.slice(Math.max(0, anchor - 1500), anchor + 22000)
     : stripped.slice(0, 16000);
 
-  return 'TITLE: ' + title + '\n\nMETA:\n' + og + '\n\nJSON-LD BLOCKS:\n' + lds.slice(0, 8000) + '\n\nPRODUCT HTML (around the product area):\n' + windowed;
+  return 'TITLE: ' + title
+    + '\n\nMETA:\n' + og
+    + '\n\nJSON-LD BLOCKS:\n' + lds.slice(0, 16000)
+    + '\n\nINLINE JSON BLOCKS (product data often lives here — read these first):\n' + (inlineJson.join('\n---\n') || '(none)')
+    + '\n\nPRODUCT HTML (around the product area):\n' + windowed;
 }
 
-const GENERATE_SYSTEM = (type) => `You are an expert web-scraper engineer. Write a single JavaScript function for a Chrome extension that extracts product data from a product page's HTML.
+// Larger page sample for "deep thinking" re-analysis. Same structure as
+// scraperHtmlSample but with much bigger budgets (more JSON-LD, more inline
+// JSON, a wider HTML window) so the reasoning model sees far more of the page.
+function deepHtmlSample(html) {
+  const h = String(html || '');
+  const lds = [...h.matchAll(/<script[^>]*application\/ld\+json[^>]*>([\s\S]*?)<\/script>/gi)].map(m => m[1]).join('\n---\n');
+  const title = (h.match(/<title[^>]*>([\s\S]*?)<\/title>/i) || [])[1] || '';
+  const og = [...h.matchAll(/<meta[^>]*property="og:([^"]+)"[^>]*content="([^"]*)"[^>]*>/gi)].map(m => 'og:' + m[1] + '=' + m[2]).join('\n');
+  const ogTitle = (h.match(/<meta[^>]*property="og:title"[^>]*content="([^"]*)"[^>]*>/i) || [])[1] || '';
 
-Write ONLY the function definition (no markdown fences, no explanation):
+  const inlineJson = [];
+  const scriptRe = /<script\b[^>]*>([\s\S]*?)<\/script>/gi;
+  let sm, budget = 100000;
+  while ((sm = scriptRe.exec(h)) && budget > 0) {
+    const openTag = sm[0].slice(0, 200);
+    if (/application\/ld\+json/i.test(openTag)) continue;
+    const inner = sm[1].trim();
+    if (!inner || inner.length < 8) continue;
+    if (/^[{\[]|"product"|"variants"|"offers"|__NEXT_DATA__|__INITIAL_STATE__|ShopifyAnalytics|product_variations|var\s+product|window\.__|dataLayer/i.test(inner)) {
+      const chunk = inner.slice(0, Math.min(inner.length, budget, 40000));
+      inlineJson.push(chunk);
+      budget -= chunk.length;
+    }
+  }
+
+  const stripped = h
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<!--[\s\S]*?-->/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  let anchor = -1;
+  const h1 = stripped.search(/<h1\b/i);
+  if (h1 >= 0) anchor = h1;
+  else {
+    const atc = stripped.search(/add[\s-]*to[\s-]*(cart|bag|basket)|addtocart|buy[\s-]*now/i);
+    if (atc >= 0) anchor = atc;
+    else {
+      const needle = (ogTitle || title).replace(/[|–—].*$/, '').trim().slice(0, 60);
+      if (needle) { const ti = stripped.indexOf(needle); if (ti >= 0) anchor = ti; }
+    }
+  }
+
+  const windowed = anchor >= 0
+    ? stripped.slice(Math.max(0, anchor - 4000), anchor + 60000)
+    : stripped.slice(0, 60000);
+
+  return 'TITLE: ' + title
+    + '\n\nMETA:\n' + og
+    + '\n\nJSON-LD BLOCKS:\n' + lds.slice(0, 60000)
+    + '\n\nINLINE JSON BLOCKS (product data often lives here — read these first):\n' + (inlineJson.join('\n---\n') || '(none)')
+    + '\n\nPRODUCT HTML (a large window around the product area):\n' + windowed;
+}
+
+// ── Three-phase direct-extraction prompts ─────────────────────────────────────
+// The agent is given the page HTML and returns DATA directly (not code) in three
+// small, focused calls, so no single call is large enough to time out. Thinking
+// stays OFF for speed. Phase 1 = core fields; Phase 2 = variants; Phase 3 = the
+// reusable scraper code (saved for future instant scrapes). Each phase is a
+// SINGLE call — there is no retry/attempt loop. Short description is NOT
+// collected; regular price IS.
+
+const CORE_SYSTEM = `You are an expert product-data extractor. You are given the HTML of a product page. Extract ONLY the core product fields and return them as ONE JSON object.
+
+Return exactly one JSON object (no markdown, no explanation, no code fences) with this shape:
+{ "name": "", "description": "", "images": [""], "categories": "", "sku": "", "regularPrice": "" }
+
+- name: the product name.
+- description: the main product description text (strip any HTML tags).
+- images: up to 4 gallery image URLs, the FIRST being the main photo. Real http(s) URLs only — never a value containing "$" or "{".
+- categories: breadcrumb / category labels joined with " > ", or "" if absent.
+- sku: the product identifier if present, else "".
+- regularPrice: the price as a numeric string (e.g. "220.00"), else "".
+
+HOW TO WORK: read the JSON-LD BLOCKS and INLINE JSON BLOCKS first — on modern stores the name, price, images and description live there. Only if a field is missing there, read the PRODUCT HTML near the title / "add to cart" area. Never return an empty field when the data exists anywhere in the HTML. Decode HTML entities in text.`;
+
+const VARIANTS_SYSTEM = `You are an expert product-data extractor. You are given the HTML of a VARIABLE product page (a product that comes in multiple variants). Extract the attributes and every variant, and return them as ONE JSON object.
+
+Return exactly one JSON object (no markdown, no explanation, no code fences) with this shape:
+{ "optionName": "", "optionName2": "", "variants": [ { "name": "", "name2": "", "sku": "", "regularPrice": "", "images": [""], "colorCode": "" } ] }
+
+- optionName: the attribute name (e.g. "Color", "Size"); default "Option".
+- optionName2: the SECOND attribute name ONLY if the product varies by more than one attribute (e.g. colour AND size); else "".
+- variants: one object per option — INCLUDE out-of-stock / sold-out / disabled options:
+  * name: the option value ("Black", "M", "42").
+  * name2: the second attribute's value for this option (only for multi-attribute products), else "".
+  * sku: that option's own id if present, else "".
+  * regularPrice: that option's OWN price as a numeric string; if the page shows one price for all variants, put that price on EACH variant.
+  * images: that option's own photos (first = main); [] if it has no distinct photo.
+  * colorCode: the colour swatch for this option — a hex colour (e.g. "#000000") if the page gives one, OR the swatch image URL if the option uses an image swatch; else "". CRITICAL: when the product varies by colour, ALWAYS fill colorCode — look for the swatch element's background colour (inline style "background:#hex" or "background-color:#hex") or its background-image URL. This drives colour swatches on import, so do not leave it empty when the page provides it.
+
+HOW TO WORK: read the JSON-LD BLOCKS (offers / hasVariant) and INLINE JSON BLOCKS (e.g. product.variants, data-product_variations) first; otherwise read the swatch buttons / <option> / radio elements in the PRODUCT HTML — swatch colour codes usually live in the swatch element's inline style or a data attribute (e.g. data-color, data-swatch, style="background:#hex"). Real http(s) URLs only. Don't copy one variant's price or photo across all variants.`;
+
+const CODE_SYSTEM = (type) => `You are an expert web scraper. Write ONE reusable JavaScript function for a Chrome extension that extracts a ${type === 'variable' ? 'variable' : 'simple'} product's data from a product page's HTML.
+
+Return ONLY the function definition (no markdown fences, no explanation):
 
 async function run(ctx) { ... }
 
-Inputs available on ctx:
-- ctx.mainHtml (string) — the full page HTML (already downloaded for you).
-- ctx.url (string) — the page URL.
-- ctx.fetchText(url, opts) / ctx.fetchJson(url, opts) — optional fetch helpers (return string/object). Use only if the data is not already in mainHtml.
+ctx.mainHtml is the full page HTML string. Helpers in scope — use them, DO NOT redefine: decodeEntities(s), ldBlocks(html), normalizeShopUrl(src), fmtPrice(p), simpleRow(obj), variableRows(title, parentImages, description, categories, optionName, variants, optionName2).
 
-Helpers already defined in scope (DO NOT redefine them): decodeEntities(s), ldBlocks(html), normalizeShopUrl(src), fmtPrice(p), simpleRow(obj), variableRows(title, parentImages, description, shortDesc, categories, optionName, variants, optionName2).
+The correct extracted data for THIS page is shown in the user message below. Write the function so that when it runs against ctx.mainHtml it reproduces that data. Read JSON-LD / inline JSON first, then semantic HTML.
 
-ldBlocks(html) returns an array of RAW JSON **strings** (the text inside each <script type="application/ld+json"> tag). Each must be JSON.parse()'d (try/catch) before reading fields:
-const blocks = ldBlocks(ctx.mainHtml).map(s => { try { return JSON.parse(s); } catch (e) { return null; } }).filter(Boolean);
+${type === 'simple'
+  ? 'Return { rows: simpleRow({ sku, name, description, regularPrice, categories, images }), title }. simpleRow(...) already returns an array — assign it directly, do NOT wrap it in another [ ].'
+  : 'Return { rows: variableRows(title, parentImages, description, categories, optionName, variants, optionName2), title }. variableRows(...) already returns an array — assign it directly, do NOT wrap it in another [ ]. Each variant object: { name, name2, sku, regularPrice, images, extras, colorCode }. Include all variants regardless of stock.'}
 
-──────────────────────────────────────────────────────────────
-OUTPUT CONTRACT (NON-NEGOTIABLE):
+RULES: pure JS + regex + JSON + the helpers only (no document/window/DOM). fmtPrice() every price. Real http(s) image URLs only.`;
 
-The ONLY correct return value is { rows, title }. You MUST build "rows" by calling the helper — do NOT hand-construct row objects and do NOT invent your own field names, because the downstream table columns are fixed and only these helpers produce them:
+// ── Conversational chat system prompt ─────────────────────────────────────────
+// The chat agent is a real conversational assistant: it talks to the user in
+// plain language AND, when the user asks for a data change, supplies a corrected
+// scraper in a separate section. We use a delimited two-section format (not
+// JSON mode) because the corrected code can be several KB — larger than the
+// 1024-token cap the edge function applies to JSON responses.
+const CHAT_SYSTEM = (type) => `You are a friendly, expert scraper engineer in a live chat with a user who is refining a scraper for a product page. Talk to them like a helpful, natural colleague — like a human expert, not a script.
 
-- simple product:   return { rows: simpleRow({ sku, name, description, shortDesc, regularPrice, categories, images }), title };
-- variable product: return { rows: variableRows(title, parentImages, description, shortDesc, categories, optionName, variants, optionName2), title };
+Each turn you receive: the product page HTML, the current scraper code, the current scraped data (what the table shows), and the full conversation so far.
 
-"title" is the product name (string). Never return rows as a plain object or with your own key names — always exactly simpleRow([...]) / variableRows(...) output.
+How to behave:
+- Reason about the page and the current data. Acknowledge what the user said in your own words.
+- Reply in natural prose. You may answer questions, explain what you found, or ask ONE short clarifying question when the user's report is ambiguous (e.g. "which variant is wrong?" or "do you mean the image or the price?").
+- You do NOT have to change the scraper every turn. Only when you are confident the scraper should change, include the full corrected function as a JavaScript code block in your reply.
+- When you do change it, briefly say what you fixed and why.
 
-──────────────────────────────────────────────────────────────
-HOW TO WORK — READ THIS CAREFULLY:
+Helpers available inside any scraper you write (do NOT redefine them):
+- decodeEntities(s), ldBlocks(html), normalizeShopUrl(src), fmtPrice(p)
+- simpleRow({ sku, name, description, regularPrice, categories, images })
+- variableRows(title, parentImages, description, categories, optionName, variants, optionName2)
 
-Every website has a UNIQUE HTML structure. You MUST NOT assume specific class names, meta tags, attribute names, or platforms (WooCommerce, Shopify, JSON-LD, etc.). Your job is to INSPECT ctx.mainHtml for THIS specific page and discover, from its actual content, where each output field lives. There is no standard selector list to follow — derive the mapping from the page itself.
+A corrected scraper must return { rows, title }, building rows ONLY via simpleRow(...) (simple) or variableRows(...) (variable). Use only pure JS + regex + JSON + the helpers (no document/window/DOM). Never emit a value containing "$", "{" or "}" as an image URL — only real http(s) URLs. Short descriptions are NOT collected. This is a ${type === 'variable' ? 'variable' : 'simple'} product.
 
-Think in this order:
-1. Read ctx.mainHtml. Identify the product's main content area (near the product name/title, price, and "add to cart" button).
-2. Look for structured data embedded in the page — JSON-LD blocks, inline JSON in <script> tags (e.g. "var product = {...}", "__NEXT_DATA__", "ShopifyAnalytics", "data-*" attributes). If present, read the fields DIRECTLY from it. Structured data is self-describing: use whatever keys it actually contains.
-3. For every field that is NOT available as structured data, locate it in the visible HTML by looking at what is actually near the product content:
-   - name/title: the page title, an <h1>, or a product-name heading.
-   - price: a number with a currency symbol/code near the title or add-to-cart button.
-   - sku/id: an identifier label ("SKU", "barcode", "product code", "MPN", "UPC", "EAN", "Code") with a value near it, or the numeric id in the URL.
-   - images: the large <img> src(s) in the product gallery area.
-   - description: a longer block of prose text describing the product.
-   - categories: breadcrumb links or "Category" labels.
-4. Do NOT hardcode anything you saw on a previous page. Match THIS page's structure.
+When you change the scraper, wrap the full corrected function in a code block like:
+\`\`\`javascript
+async function run(ctx) { ... }
+\`\`\``;
 
-NEVER return an empty field just because there is "no JSON-LD" — that is a failure. If a field's data exists anywhere in mainHtml, find it.
+// Parse the agent's natural reply into { reply, code }. Instead of demanding a
+// rigid two-section template, we extract a corrected run() function IF the model
+// chose to write one (inside a fenced code block or as a bare function), and
+// treat everything else as the conversational reply.
+function parseChatReply(text) {
+  const s = String(text || '').trim();
+  let code = '';
+  let reply = s;
 
-──────────────────────────────────────────────────────────────
+  // 1) Prefer a fenced code block containing an async function run().
+  const fence = s.match(/```(?:javascript|js)?\s*([\s\S]*?)```/i);
+  if (fence && /async\s+function\s+run\s*\(/.test(fence[1])) {
+    code = fence[1];
+    reply = (s.slice(0, fence.index) + ' ' + s.slice(fence.index + fence[0].length)).trim();
+  } else if (/async\s+function\s+run\s*\(/.test(s)) {
+    // 2) Fallback: the whole reply is just the function (no prose).
+    code = s;
+    reply = '';
+  }
 
-${type === 'variable'
-  ? `This is a VARIABLE product: it has selectable options (size, colour, shade, etc.) and EACH option usually has its own price and its own photo.
-
-Build rows with: variableRows(title, parentImages, description, shortDesc, categories, optionName, variants, optionName2)
-
-The variants array is the core of a variable product. Discover each option's data from THIS page's structure:
-- Find the source of the option list — it may be embedded JSON (JSON-LD hasVariant/offers arrays, a "data-product_variations" attribute, inline "product.variants", "__NEXT_DATA__", etc.), or HTML elements (swatches, <option>, radio inputs) with their own data attributes. Use whichever this page actually provides.
-- INCLUDE EVERY OPTION: scrape ALL options/variants the page offers — including out-of-stock, unavailable, sold-out, or disabled ones. NEVER filter variants by stock or availability. If an option is marked out of stock, still emit its variant (name, its own price if present, and its own photo if present).
-- For EVERY option, produce one variant object with its OWN data (this is the whole point):
-  * name         — the option value (e.g. "Black", "Size M", "42").
-  * name2        — the SECOND attribute's value for this option, ONLY when the product has more than one attribute (e.g. a product varying by colour AND size: name="Black", name2="M"; or material AND size: name="Cotton", name2="L"). If the product has a single attribute, set name2 to ''.
-  * sku          — that option's own SKU/id, if the page provides one per option; else ''.
-  * regularPrice — that option's OWN normal price (numeric string like "15.00", via fmtPrice).
-  * images       — array of image URLs for THIS SPECIFIC option (its own photo). The FIRST image is the main photo. If a specific option has no distinct photo, set images to [] (never reuse another option's photo as if it were its own).
-  * extras       — extra gallery images for this option (may be []).
-  * colorCode    — hex colour or swatch image URL for this option, if the page provides it; else ''.
-- "parentImages" = photos shown before any option is selected (the shared gallery). If the page only has per-option images, pass [].
-- "optionName" = the attribute name (e.g. "Color", "Size", "Shade") — read it from the page; default to "Option" if absent.
-- "optionName2" = the SECOND attribute name, ONLY when the product has more than one selectable attribute (e.g. "Size" when the first is "Color", or "Material" when the first is "Size"). This applies to ANY multi-attribute product, not just clothing. When there is only one attribute, pass '' (empty string) and leave every variant's name2 as ''.
-
-CRITICAL: do NOT copy one price or one image across all options. If the page stores per-option data in a JSON structure whose keys differ from the examples above, read THOSE keys — the structure is whatever the page actually uses.`
-  : `This is a SIMPLE product (single product, one price, no options). Build rows with: simpleRow({ sku, name, description, shortDesc, regularPrice, categories, images }) and return { rows, title }. images is an array of image URL strings (normalizeShopUrl() each). regularPrice is a numeric string like "20.76" (via fmtPrice). Use structured data if present; otherwise locate each field in the visible HTML as described above.`}
-
-RULES:
-- Never use document, window, location, self, or any DOM API. Only pure JS + regex + JSON + the provided helpers.
-- ALWAYS build rows via simpleRow(...) (simple) or variableRows(...) (variable) and return { rows, title }. Do NOT hand-build row objects or invent your own key names.
-- Inspect ctx.mainHtml and derive the mapping from THIS page. Do not assume any specific framework, class, or meta tag.
-- Use fmtPrice() to normalise every price, and strip query strings from image URLs (normalizeShopUrl()).
-- Images: match ONLY real <img> src values (or srcset/data URLs) that look like actual URLs. Inline script blocks often contain JS template placeholders (a dollar sign followed by braces, e.g. "$img") that look like image markup — NEVER emit those as an image URL, and never emit any value containing "$" or "{". Strip script blocks (except JSON-LD) before matching images, or filter matches to those starting with http/https.
-- For variable products, include ALL variants/options regardless of stock or availability. Never skip out-of-stock or unavailable variants.
-- Robustness: optional chaining and fall back to '' for missing fields.`;
-
-// Drop obviously-broken image URLs a scraper may have produced (e.g. a template
-// placeholder like "$img" or "${img}" matched from inline <script> markup). A
-// single bad URL otherwise makes WooCommerce reject the ENTIRE product.
-function cleanImageList(arr) {
-  if (!Array.isArray(arr)) return [];
-  return arr
-    .map(u => String(u == null ? '' : u).trim())
-    .filter(u => u !== '' && u.indexOf('$') < 0 && u.indexOf('{') < 0 && u.indexOf('}') < 0 &&
-      (u.startsWith('http://') || u.startsWith('https://') || u.startsWith('//') || u.startsWith('data:')));
-}
-
-// Sanitize scraped rows: clean every image-bearing field so one bad URL can't
-// block an import. Applied to every scraper (custom AI, predefined, generated).
-function sanitizeRows(rows) {
-  if (!Array.isArray(rows)) return [];
-  return rows.map(r => {
-    if (!r || typeof r !== 'object') return r;
-    const c = Object.assign({}, r);
-    for (const k of ['Images', 'Rey Variations extra images']) {
-      if (Array.isArray(c[k])) c[k] = cleanImageList(c[k]);
-    }
-    return c;
-  });
+  code = code.replace(/^\s*```[\w]*\s*/i, '').replace(/\s*```\s*$/, '').trim();
+  if (/^NONE$/i.test(code)) code = '';
+  return { reply: reply || (code ? '' : 'Done.'), code };
 }
 
 // Runs a generated scraper body in the page's MAIN world. `new Function` (eval)
@@ -406,8 +529,35 @@ function sanitizeRows(rows) {
 // allowed in the page's own JS context. The page HTML is passed in as an argument
 // (already downloaded in the service worker), so the scraper never reads the DOM
 // and never depends on the page's own CSP for content.
+// NOTE: this function is serialized by chrome.scripting.executeScript and run in
+// the page's MAIN world — it can ONLY reference itself (no outer scope), so the
+// sanitization helpers are INLINED below as `sanitize` / `cleanImages`.
 function evalScraperInMain(code, productType, html) {
   return (async () => {
+    // Inlined (self-contained) sanitization: drop placeholder image URLs and
+    // flatten an accidental double-wrap, so one bad URL can't block the import.
+    const cleanImages = (arr) => {
+      if (!Array.isArray(arr)) return [];
+      return arr.map((u) => String(u == null ? '' : u).trim()).filter((u) =>
+        u !== '' && u.indexOf('$') < 0 && u.indexOf('{') < 0 && u.indexOf('}') < 0 &&
+        (u.startsWith('http://') || u.startsWith('https://') || u.startsWith('//') || u.startsWith('data:')));
+    };
+    const sanitize = (rows) => {
+      if (!Array.isArray(rows)) return [];
+      if (rows.some((r) => Array.isArray(r))) {
+        const flat = [];
+        for (const r of rows) { if (Array.isArray(r)) flat.push(...r); else flat.push(r); }
+        rows = flat;
+      }
+      return rows.map((r) => {
+        if (!r || typeof r !== 'object') return r;
+        const c = Object.assign({}, r);
+        for (const k of ['Images', 'Rey Variations extra images']) {
+          if (Array.isArray(c[k])) c[k] = cleanImages(c[k]);
+        }
+        return c;
+      });
+    };
     try {
       const fetchText = async (u, opts) => {
         const r = await fetch(u, Object.assign({ credentials: 'include' }, opts));
@@ -426,7 +576,14 @@ function evalScraperInMain(code, productType, html) {
         mainHtml: html || document.documentElement.outerHTML,
         fetchText, fetchJson,
       });
-      return { ok: true, rows: sanitizeRows((out && out.rows) || []), title: (out && out.title) || '', site: (out && out.site) || '', brand: (out && out.brand) || '' };
+      // When the model returns the wrong shape (no rows array), surface what it
+      // actually returned so the agent loop can tell it exactly what went wrong
+      // instead of looping on a bare "no rows were produced".
+      let debug = '';
+      if (!out || !Array.isArray(out.rows) || !out.rows.length) {
+        try { debug = JSON.stringify(out).slice(0, 600); } catch (e) { debug = String(out).slice(0, 600); }
+      }
+      return { ok: true, rows: sanitize((out && out.rows) || []), title: (out && out.title) || '', site: (out && out.site) || '', brand: (out && out.brand) || '', debug };
     } catch (e) {
       return { ok: false, error: (e && e.message) || String(e) };
     }
@@ -448,45 +605,27 @@ async function runScraperInPage(tabId, code, productType, html) {
   }
 }
 
-// Verdict for a scraper run. Returns { ok, problem } where `problem` is a
-// human-readable explanation of what still needs fixing ('' when ok).
-function evaluateResult(res, type) {
-  if (!res || !Array.isArray(res.rows) || !res.rows.length) {
-    return { ok: false, problem: 'no rows were produced.' };
+// Parse a JSON object out of an AI reply (it may be wrapped in code fences or
+// have stray surrounding prose). Returns the object or null.
+function extractJson(raw) {
+  const s = stripFences(raw);
+  try { return JSON.parse(s); } catch (e) {}
+  const m = s.match(/\{[\s\S]*\}/);
+  if (m) { try { return JSON.parse(m[0]); } catch (e) {} }
+  return null;
+}
+
+// Build a deterministic run body that reconstructs rows from the extracted
+// core/variants data. We reuse the existing simpleRow/variableRows helpers so
+// the output is normalized exactly like an AI-written scraper, and the rows
+// still pass through the inlined `sanitize()` in the injected runner.
+function buildDataBody(type, core, variants) {
+  const c = JSON.stringify(core || {});
+  if (type === 'simple') {
+    return 'async function run(ctx){ const d = ' + c + '; return { rows: simpleRow({ sku: d.sku || \'\', name: d.name || \'\', description: d.description || \'\', regularPrice: d.regularPrice || \'\', categories: d.categories || \'\', images: Array.isArray(d.images) ? d.images : [] }), title: d.name || \'\' }; }';
   }
-  if (type === 'variable') {
-    const hasParent = res.rows.some(r => r && r.Type === 'variable');
-    if (!hasParent) {
-      return { ok: false, problem: 'there is no "variable" parent row — you must call variableRows(...) and return its rows (a variable row followed by variation rows).' };
-    }
-    const vars = res.rows.filter(r => r && r.Type === 'variation');
-    if (!vars.length) {
-      return { ok: false, problem: 'no "variation" rows were produced — this product has options, so build a variants array and pass it to variableRows(...).' };
-    }
-    const withPrice = vars.filter(r => r['Regular Price'] && r['Regular Price'] !== '').length;
-    const withImg = vars.filter(r => Array.isArray(r.Images) && r.Images.length).length;
-    if (withPrice === 0 || withImg === 0) {
-      const missing = [];
-      if (withPrice === 0) missing.push('no variant has its own price');
-      if (withImg === 0) missing.push('no variant has its own photo');
-      return { ok: false, problem: missing.join(' and ') + ' — locate each variant\'s own price and photo in the HTML and map them.' };
-    }
-    return { ok: true, problem: '' };
-  }
-  // simple
-  const row = res.rows[0] || {};
-  if (typeof row.Name !== 'string') {
-    return { ok: false, problem: 'the row is not in the required schema (missing "Name") — call simpleRow({...}) and return { rows, title }.' };
-  }
-  const hasPrice = !!row['Regular Price'];
-  const hasImg = Array.isArray(row.Images) && row.Images.length > 0;
-  if (!hasPrice || !hasImg) {
-    const missing = [];
-    if (!hasPrice) missing.push('price');
-    if (!hasImg) missing.push('image');
-    return { ok: false, problem: 'no ' + missing.join(' or ') + ' was extracted — locate it in the page HTML.' };
-  }
-  return { ok: true, problem: '' };
+  const v = JSON.stringify(variants || {});
+  return 'async function run(ctx){ const d = ' + c + '; const v = ' + v + '; const vars = (Array.isArray(v.variants) ? v.variants : []).map(function(x){ return { name: x.name || \'\', name2: x.name2 || \'\', sku: x.sku || \'\', regularPrice: x.regularPrice || \'\', images: Array.isArray(x.images) ? x.images : [], extras: Array.isArray(x.extras) ? x.extras : [], colorCode: x.colorCode || \'\' }; }); return { rows: variableRows(d.name || \'\', Array.isArray(d.images) ? d.images : [], d.description || \'\', d.categories || \'\', v.optionName || \'Option\', vars, v.optionName2 || \'\'), title: d.name || \'\' }; }';
 }
 
 // Compact dump of the rows a scraper produced, so the agent can SEE its actual
@@ -513,6 +652,12 @@ function describeRows(rows) {
   return out + (rows.length > 30 ? '\n... and ' + (rows.length - 30) + ' more rows' : '');
 }
 
+// ── Three-step generation (no retry loop) ─────────────────────────────────────
+// The AI reads the HTML and returns data directly, in three small single-shot
+// calls (each far under the timeout), with thinking disabled for speed:
+//   Step 1 — core fields (name, description, images, price, categories, sku)
+//   Step 2 — variants (variable products only)
+//   Step 3 — a reusable run() scraper, written from the data above, for saving.
 async function generateScraper({ tabId, url, productType }) {
   const effectiveType = productType === 'variable' ? 'variable' : 'simple';
   cancelRequested = false;
@@ -521,80 +666,144 @@ async function generateScraper({ tabId, url, productType }) {
   try {
     const html = await getTabHtml(tabId);
     const sample = scraperHtmlSample(html);
-    const MAX_TURNS = 6;
+    const ctxUser = 'Product page URL: ' + url + '\n\n' + sample;
 
-    // Agentic loop: the model writes a scraper, we RUN it against the real HTML,
-    // then feed the ACTUAL output back so it can see its own result and correct
-    // the per-site mapping — instead of a single blind prompt with retries.
-    const messages = [
-      { role: 'system', content: GENERATE_SYSTEM(effectiveType) },
-      { role: 'user', content: 'Product page URL: ' + url + '\n\n' + sample },
-    ];
+    // STEP 1 — core fields (single call).
+    sendThinking('Step 1/3: reading name, description, images and price…');
+    const coreRaw = await callDeepSeek([
+      { role: 'system', content: CORE_SYSTEM },
+      { role: 'user', content: ctxUser },
+    ], { signal: ctrl.signal });
+    if (cancelRequested) return { cancelled: true };
+    const core = extractJson(coreRaw);
+    if (!core) throw new Error('The AI did not return valid core fields. Please try again.');
 
-    for (let turn = 1; turn <= MAX_TURNS; turn++) {
+    // STEP 2 — variants (variable only; single call).
+    let variants = null;
+    if (effectiveType === 'variable') {
+      sendThinking('Step 2/3: reading variants and attributes…');
+      const varRaw = await callDeepSeek([
+        { role: 'system', content: VARIANTS_SYSTEM },
+        { role: 'user', content: ctxUser },
+      ], { signal: ctrl.signal });
       if (cancelRequested) return { cancelled: true };
-      sendThinking(turn === 1
-        ? 'Reading the page and designing a scraper for this site…'
-        : 'Reviewing the previous attempt and correcting it…');
-
-      let raw;
-      try {
-        raw = await callDeepSeek(messages, {
-          onReasoning: (r) => sendThinking(trimThinking(r)),
-          signal: ctrl.signal,
-        });
-      } catch (e) {
-        if (e && e.cancelled) return { cancelled: true };
-        throw e;
+      variants = extractJson(varRaw);
+      if (!variants || !Array.isArray(variants.variants) || !variants.variants.length) {
+        throw new Error('The AI could not find variants for this product. It may actually be a simple product.');
       }
-      const runBody = stripFences(raw);
-
-      if (!/async\s+function\s+run\s*\(/.test(runBody)) {
-        sendThinking('The agent replied without a run() function — asking it to retry…');
-        messages.push({ role: 'assistant', content: raw });
-        messages.push({ role: 'user', content: 'You did not return an "async function run(ctx) { ... }". Reply with ONLY the function definition.' });
-        continue;
-      }
-
-      sendThinking('Running the generated scraper against the page…');
-      const body = buildScraperBody(runBody);
-      const res = await runScraperInPage(tabId, body, effectiveType, html);
-      if (cancelRequested) return { cancelled: true };
-
-      if (!res.ok) {
-        sendThinking('The scraper threw an error — the agent is fixing the code…');
-        messages.push({ role: 'assistant', content: raw });
-        messages.push({ role: 'user', content: 'Your code threw an error:\n' + (res.error || 'unknown error') + '\n\nFix the code and return a corrected run() function.' });
-        continue;
-      }
-
-      const verdict = evaluateResult(res, effectiveType);
-      if (verdict.ok) {
-        sendThinking('Scraper works — extracted ' + res.rows.length + ' row' + (res.rows.length === 1 ? '' : 's') + '.');
-        return { ok: true, rows: res.rows, title: res.title, body, type: effectiveType };
-      }
-
-      // Feed back the real output so the agent sees exactly what it got wrong.
-      sendThinking('Scraper ran but the mapping is off: ' + verdict.problem);
-      messages.push({ role: 'assistant', content: raw });
-      messages.push({
-        role: 'user',
-        content: 'Your scraper ran and returned these rows:\n' + describeRows(res.rows)
-          + '\n\nProblem: ' + verdict.problem + '\n\nFix the mapping and return a corrected run() function.',
-      });
     }
 
-    throw new Error('Could not generate a working scraper after ' + MAX_TURNS + ' agent turns.');
+    // Reconstruct normalized rows from the extracted data (deterministic, and
+    // still passes through the inlined `sanitize()` in the injected runner).
+    sendThinking('Building the product table…');
+    const dataBody = buildDataBody(effectiveType, core, variants);
+    const dataRun = buildScraperBody(dataBody);
+    const dataRes = await runScraperInPage(tabId, dataRun, effectiveType, html);
+    if (cancelRequested) return { cancelled: true };
+    if (!dataRes.ok) throw new Error(dataRes.error || 'Could not build the product rows.');
+    const rows = dataRes.rows || [];
+    if (!rows.length) throw new Error('No product data was produced.');
+
+    // STEP 3 — reusable scraper code (single call), written from the data.
+    sendThinking('Step 3/3: writing the reusable scraper…');
+    const codeRaw = await callDeepSeek([
+      { role: 'system', content: CODE_SYSTEM(effectiveType) },
+      { role: 'user', content: ctxUser + '\n\nCorrect extracted data:\n' + JSON.stringify(rows) },
+    ], { signal: ctrl.signal });
+    if (cancelRequested) return { cancelled: true };
+    const runBody = stripFences(codeRaw);
+    const body = /async\s+function\s+run\s*\(/.test(runBody) ? buildScraperBody(runBody) : dataBody;
+
+    return { ok: true, rows, title: dataRes.title || core.name || '', body, type: effectiveType };
   } finally {
     if (currentGenAbort === ctrl) currentGenAbort = null;
   }
 }
 
-// ── Conversational scraper fixing (chat) ─────────────────────────────────────
-// The user talks to the same AI agent in natural language about what's wrong
-// with the scraped data. We regenerate the run() function, keeping the page
-// sample + the current code + the whole chat history as context, then re-run.
-async function chatFixScraper({ tabId, url, productType, feedback, history, body }) {
+// ── Deep re-analysis (reasoning enabled) ─────────────────────────────────────
+// Re-runs extraction with chain-of-thought ON and a much larger page sample, so
+// the model reasons over the whole page and corrects what the fast pass missed.
+//
+// TIMEOUT / "keep him warm" strategy — DeepSeek is stateless, so "keeping the
+// agent warm" is done by (a) splitting the work into small checkpointed calls
+// that each finish far under the wall-clock limit, and (b) threading the full
+// context + prior findings into every call so a fresh call "remembers" exactly
+// where the last one stopped. If a step times out we re-issue ONLY that step
+// with the same accumulated context — nothing already extracted is lost, and
+// the model never restarts from scratch.
+async function deepReanalyze({ tabId, url, productType }) {
+  const effectiveType = productType === 'variable' ? 'variable' : 'simple';
+  cancelRequested = false;
+  const ctrl = new AbortController();
+  currentGenAbort = ctrl;
+  try {
+    const html = await getTabHtml(tabId);
+    const ctxUser = 'Product page URL: ' + url + '\n\n' + deepHtmlSample(html);
+
+    // Deep call: reasoning on, bounded 60s timeout, live "thinking" feed.
+    const deep = (system, user) => callDeepSeek([
+      { role: 'system', content: system },
+      { role: 'user', content: user },
+    ], { signal: ctrl.signal, thinking: true, timeoutMs: 60000, onReasoning: (r) => sendThinking(trimThinking(r)) });
+
+    // A step that may time out: on timeout, resume once with the same context.
+    const withResume = async (system, user) => {
+      try { return await deep(system, user); }
+      catch (e) {
+        if (e && e.cancelled) throw e;
+        sendThinking('Deep thinking stalled — resuming from where it stopped…');
+        return await deep(system, user);
+      }
+    };
+
+    // STEP 1 — core fields (checkpoint 1).
+    sendThinking('Deep 1/3: analyzing name, description, images and price…');
+    const core = extractJson(await withResume(CORE_SYSTEM, ctxUser));
+    if (cancelRequested) return { cancelled: true };
+    if (!core) throw new Error('Deep thinking could not read the core fields.');
+
+    // STEP 2 — variants (checkpoint 2, threaded with core so it stays "warm").
+    let variants = null;
+    if (effectiveType === 'variable') {
+      sendThinking('Deep 2/3: analyzing variants and attributes…');
+      variants = extractJson(await withResume(VARIANTS_SYSTEM, ctxUser + '\n\nCore data already found (keep it, only add/fix variants):\n' + JSON.stringify(core)));
+      if (cancelRequested) return { cancelled: true };
+      if (!variants || !Array.isArray(variants.variants) || !variants.variants.length) {
+        throw new Error('Deep thinking could not find variants. It may be a simple product.');
+      }
+    }
+
+    // Rebuild the table from the corrected data.
+    sendThinking('Deep thinking: rebuilding the corrected table…');
+    const dataBody = buildDataBody(effectiveType, core, variants);
+    const dataRun = buildScraperBody(dataBody);
+    const dataRes = await runScraperInPage(tabId, dataRun, effectiveType, html);
+    if (cancelRequested) return { cancelled: true };
+    if (!dataRes.ok) throw new Error(dataRes.error || 'Could not build the product rows.');
+
+    // STEP 3 — regenerate the reusable scraper code from the corrected data.
+    sendThinking('Deep 3/3: writing the corrected scraper…');
+    const codeRaw = await callDeepSeek([
+      { role: 'system', content: CODE_SYSTEM(effectiveType) },
+      { role: 'user', content: ctxUser + '\n\nCorrect extracted data:\n' + JSON.stringify(dataRes.rows) },
+    ], { signal: ctrl.signal });
+    if (cancelRequested) return { cancelled: true };
+    const runBody = stripFences(codeRaw);
+    const body = /async\s+function\s+run\s*\(/.test(runBody) ? buildScraperBody(runBody) : dataBody;
+
+    return { ok: true, rows: dataRes.rows, title: dataRes.title || core.name || '', body, type: effectiveType };
+  } finally {
+    if (currentGenAbort === ctrl) currentGenAbort = null;
+  }
+}
+
+// ── Conversational scraper chat ──────────────────────────────────────────────
+// The agent is a real conversational assistant. It replies in natural language
+// and, when the user asks for a data change, also returns a corrected run()
+// function in a separate section. We keep the page sample + current code + the
+// current scraped rows + full chat history as context so it can answer
+// questions AND fix scrapers, then re-run the code when it provided one.
+async function chatFixScraper({ tabId, url, productType, feedback, history, body, rows }) {
   const effectiveType = productType === 'variable' ? 'variable' : 'simple';
   cancelRequested = false;
   const ctrl = new AbortController();
@@ -608,47 +817,65 @@ async function chatFixScraper({ tabId, url, productType, feedback, history, body
       .map(m => (m.role === 'assistant' ? 'Agent: ' : 'User: ') + String(m.content))
       .join('\n');
 
+    const currentDump = (Array.isArray(rows) && rows.length) ? describeRows(rows) : '(no data yet)';
+
     const messages = [
-      { role: 'system', content: GENERATE_SYSTEM(effectiveType) },
+      { role: 'system', content: CHAT_SYSTEM(effectiveType) },
       { role: 'user', content: 'Product page URL: ' + url + '\n\n' + sample
         + (body ? '\n\nCurrent scraper code (for reference):\n' + body : '')
+        + '\n\nCurrent scraped data (what the table shows):\n' + currentDump
         + (prior ? '\n\nConversation so far (for context):\n' + prior : '')
-        + '\n\nThe user reports this issue with the scraped data:\n' + feedback
-        + '\n\nReturn ONLY a corrected "async function run(ctx) { ... }" (no fences, no explanation). Keep everything that is already correct and fix only what the user reported.'
+        + '\n\nThe user just said:\n' + feedback
       },
     ];
 
-    let lastError = '';
-    for (let attempt = 1; attempt <= 2; attempt++) {
-      if (cancelRequested) return { cancelled: true };
-      sendThinking('Updating the scraper based on your message…');
-      let raw;
-      try {
-        raw = await callDeepSeek(messages, { onReasoning: r => sendThinking(trimThinking(r)), signal: ctrl.signal });
-      } catch (e) {
-        if (e && e.cancelled) return { cancelled: true };
+    if (cancelRequested) return { cancelled: true };
+    sendThinking('The agent is thinking…');
+
+    // Deep reasoning ON, bounded timeout, live "thinking" feed. On timeout we
+    // re-issue the SAME message once (the full history + context is already in
+    // it), so the agent resumes where it stopped instead of losing the thread.
+    const deepCall = () => callDeepSeek(messages, {
+      signal: ctrl.signal,
+      thinking: true,
+      timeoutMs: 60000,
+      onReasoning: (r) => sendThinking(trimThinking(r)),
+    });
+    let raw;
+    try {
+      raw = await deepCall();
+    } catch (e) {
+      if (e && e.cancelled) return { cancelled: true };
+      if (/timed out/i.test(e.message || '')) {
+        sendThinking('Thinking stalled — resuming from where it stopped…');
+        raw = await deepCall();
+      } else {
         throw e;
       }
-      const runBody = stripFences(raw);
-      if (!/async\s+function\s+run\s*\(/.test(runBody)) {
-        lastError = 'the model did not return a run() function';
-        messages.push({ role: 'assistant', content: raw });
-        messages.push({ role: 'user', content: 'You did not return an "async function run(ctx) { ... }". Reply with ONLY the function definition.' });
-        continue;
-      }
-      sendThinking('Running the updated scraper against the page…');
-      const newBody = buildScraperBody(runBody);
-      const res = await runScraperInPage(tabId, newBody, effectiveType, html);
-      if (cancelRequested) return { cancelled: true };
-      if (res.ok) {
-        sendThinking('Updated scraper works.');
-        return { ok: true, rows: res.rows, title: res.title, body: newBody };
-      }
-      lastError = res.error || 'unknown error';
-      messages.push({ role: 'assistant', content: raw });
-      messages.push({ role: 'user', content: 'Your code threw an error:\n' + lastError + '\n\nFix the code and return a corrected run() function.' });
     }
-    return { ok: false, error: 'Could not update the scraper: ' + lastError };
+    if (cancelRequested) return { cancelled: true };
+
+    const { reply, code } = parseChatReply(raw);
+
+    // No corrected code → it was just answering / asking / explaining.
+    if (!code) {
+      return { ok: true, reply, changed: false };
+    }
+
+    const runBody = stripFences(code);
+    if (!/async\s+function\s+run\s*\(/.test(runBody)) {
+      return { ok: false, error: 'The agent produced invalid scraper code — please ask it again.' };
+    }
+
+    sendThinking('Running the updated scraper against the page…');
+    const newBody = buildScraperBody(runBody);
+    const res = await runScraperInPage(tabId, newBody, effectiveType, html);
+    if (cancelRequested) return { cancelled: true };
+    if (!res.ok) {
+      return { ok: false, error: 'The updated scraper threw an error: ' + (res.error || 'unknown') };
+    }
+
+    return { ok: true, reply, changed: true, rows: res.rows, title: res.title, body: newBody };
   } finally {
     if (currentGenAbort === ctrl) currentGenAbort = null;
   }

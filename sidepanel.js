@@ -1,7 +1,7 @@
 'use strict';
 
-const VARIABLE_COLUMNS = ['ID','Parent','Type','SKU','Name','tags','Product URL','Images','Description','Short Description','Regular Price','Attribute 1 name','Attribute 1 value(s)','Attribute 2 name','Attribute 2 value(s)','Attribute 1 visible','Attribute 1 global','Color Code','Rey Swatches'];
-const SIMPLE_COLUMNS = ['SKU','Name','tags','Product URL','Description','Short Description','Regular Price','Images'];
+const VARIABLE_COLUMNS = ['ID','Parent','Type','SKU','Name','Images','Description','Regular Price','Attribute 1 name','Attribute 1 value(s)','Attribute 2 name','Attribute 2 value(s)','Attribute 1 visible','Attribute 1 global','Color Code','Rey Swatches'];
+const SIMPLE_COLUMNS = ['SKU','Name','Description','Regular Price','Images'];
 
 let currentRows = [];
 let currentType = 'variable';
@@ -16,8 +16,7 @@ let currentHasVariable = false; // whether a variable scraper exists for it
 let pendingType = '';         // 'simple' | 'variable' for the AI scraper being built
 let pendingBody = '';         // the generated (unsaved) scraper code
 let pendingUrl = '';          // URL used for generation
-let chatHistory = [];         // [{role:'user'|'agent', content}]
-let notesTimer = null;        // debounce timer for notes autosave
+let chatHistory = [];         // [{role:'user'|'agent', content}] for the fix chat
 
 const $ = id => document.getElementById(id);
 const escHtml = s => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -67,7 +66,6 @@ async function refreshScraperStatus() {
   currentHasSimple = hasSimple;
   currentHasVariable = hasVariable;
   updateHeroButtons();
-  loadNotesForDomain(domain);
 }
 
 function updateHeroButtons() {
@@ -109,8 +107,9 @@ function updateHeroButtons() {
 
 // Reset transient state before starting a fresh scrape / generation.
 function resetForNewScrape() {
-  hideChat();
   hideSaveRow();
+  hideDeepThink();
+  hideChat();
   hideTypeSelector();
   hideAgentWorking();
   pendingBody = '';
@@ -195,8 +194,9 @@ async function startAddScraper(type) {
   pendingType = type;
   pendingUrl = tab.url;
   chatHistory = [];
-  hideChat();
   hideSaveRow();
+  hideDeepThink();
+  hideChat();
   showAgentWorking();
   status('loading', 'The AI is building a ' + (type === 'variable' ? 'variable' : 'simple') + ' scraper for this site…');
   try {
@@ -208,11 +208,11 @@ async function startAddScraper(type) {
     currentRows = res.rows || [];
     // Trust the user's explicit choice (not row sniffing) for the table type.
     setType(pendingType === 'variable' ? 'variable' : 'simple');
-    currentRows.forEach(r => { r.tags = brandFromUrl(tab.url); r['Product URL'] = tab.url; });
     hideAgentWorking();
     $('status').classList.add('hidden');
     renderResults(res.title || '');
-    openChat();
+    showSaveRow();
+    showDeepThink();
   } catch (e) {
     hideAgentWorking();
     status('error', e.message);
@@ -221,19 +221,37 @@ async function startAddScraper(type) {
 
 function status(type, msg) { const el = $('status'); el.className = `status ${type}`; el.textContent = msg; el.classList.remove('hidden'); }
 
-// ═══ AI chat: talk to the agent about the scraped data ═══════════════════════
+// ═══ Save row (shown after the AI scraper is generated) ══════════════════════
+function showSaveRow() { $('save-row').classList.remove('hidden'); }
+function hideSaveRow() { $('save-row').classList.add('hidden'); }
+
+// ═══ Deep re-analysis ("Use deep thinking") → opens the conversational chat ═══
+function showDeepThink() { $('deep-think').classList.remove('hidden'); }
+function hideDeepThink() { $('deep-think').classList.add('hidden'); }
+
+$('deep-think-btn').addEventListener('click', () => {
+  hideDeepThink();
+  openChat();
+});
+
+// ═══ Conversational chat to fix the scraped data ══════════════════════════════
 function openChat() {
   if (!pendingBody) return;
+  hideDeepThink();
   $('chat-panel').classList.remove('hidden');
   $('chat-messages').innerHTML = '';
-  addChatMessage('agent', 'I scraped this ' + (pendingType === 'variable' ? 'variable' : 'simple') + ' product. Tell me if anything looks wrong — e.g. "prices are wrong", "missing variants", "wrong images" — and I\'ll fix it. When it\'s right, tap "Add to scrappers".');
+  addChatMessage('agent', 'I scraped this ' + (pendingType === 'variable' ? 'variable' : 'simple') + ' product — the table shows what I found. Tell me what looks wrong (wrong price, missing variants, wrong images, etc.) and I\'ll look into it.');
+  $('chat-status').className = 'status hidden';
   $('save-row').classList.remove('hidden');
 }
-function hideChat() { $('chat-panel').classList.add('hidden'); }
-function hideSaveRow() { $('save-row').classList.add('hidden'); }
+
+function hideChat() {
+  $('chat-panel').classList.add('hidden');
+}
 
 function addChatMessage(role, content) {
   const wrap = $('chat-messages');
+  if (!wrap) return;
   const div = document.createElement('div');
   div.className = 'chat-msg ' + role;
   const bubble = document.createElement('div');
@@ -260,7 +278,7 @@ async function sendChat() {
   input.value = '';
   addChatMessage('user', text);
   chatHistory.push({ role: 'user', content: text });
-  chatStatus('loading', 'The AI is updating the scraper…');
+  chatStatus('loading', 'The agent is thinking…');
   $('chat-send-btn').disabled = true;
   try {
     const tab = await activeTab();
@@ -273,17 +291,22 @@ async function sendChat() {
       feedback: text,
       history: chatHistory.slice(0, -1),
       body: pendingBody,
+      rows: currentRows,
     });
     if (chrome.runtime.lastError) throw new Error(chrome.runtime.lastError.message);
     if (res && res.cancelled) { chatStatus('warn', 'Cancelled.'); return; }
-    if (!res || !res.ok) throw new Error((res && res.error) || 'Fix failed');
-    pendingBody = res.body || pendingBody;
-    currentRows = res.rows || [];
-    setType(pendingType === 'variable' ? 'variable' : 'simple');
-    currentRows.forEach(r => { r.tags = brandFromUrl(tab.url); r['Product URL'] = tab.url; });
-    renderResults(res.title || '');
-    chatHistory.push({ role: 'agent', content: 'Done — updated the scraper.' });
-    addChatMessage('agent', 'Done — the scraper now returns ' + (currentRows.length) + ' row' + (currentRows.length === 1 ? '' : 's') + '. Anything else to fix, or does this look right?');
+    if (!res || !res.ok) throw new Error((res && res.error) || 'The agent could not reply');
+
+    if (res.changed) {
+      pendingBody = res.body || pendingBody;
+      currentRows = res.rows || [];
+      setType(pendingType === 'variable' ? 'variable' : 'simple');
+      renderResults(res.title || '');
+    }
+
+    const reply = res.reply || 'Done.';
+    chatHistory.push({ role: 'agent', content: reply });
+    addChatMessage('agent', reply);
     chatStatus('hidden');
   } catch (e) {
     chatStatus('error', e.message);
@@ -311,7 +334,6 @@ $('add-to-scrapers-btn').addEventListener('click', async () => {
     });
     if (chrome.runtime.lastError) throw new Error(chrome.runtime.lastError.message);
     if (!res || !res.ok) throw new Error((res && res.error) || 'Save failed');
-    hideChat();
     hideSaveRow();
     status('success', 'Scraper added for this website (' + pendingType + ').');
     brandsRendered = false;
@@ -326,8 +348,9 @@ $('add-to-scrapers-btn').addEventListener('click', async () => {
 $('cancel-scraper-btn').addEventListener('click', resetToHero);
 
 function resetToHero() {
-  hideChat();
   hideSaveRow();
+  hideDeepThink();
+  hideChat();
   hideTypeSelector();
   hideAgentWorking();
   pendingBody = '';
@@ -343,52 +366,6 @@ function resetToHero() {
   $('hero').classList.remove('hero-error');
   refreshScraperStatus();
 }
-
-// ═══ Site notes (per-domain, persistent) ══════════════════════════════════════
-async function getSiteNotes() {
-  const { siteNotes } = await chrome.storage.local.get('siteNotes');
-  return (siteNotes && typeof siteNotes === 'object') ? siteNotes : {};
-}
-async function setSiteNotes(map) {
-  await chrome.storage.local.set({ siteNotes: map });
-}
-
-function loadNotesForDomain(domain) {
-  const input = $('notes-input');
-  const label = $('notes-domain');
-  label.textContent = domain || '';
-  getSiteNotes().then(map => {
-    if (currentDomain !== domain) return; // the user navigated away mid-load
-    input.value = map[domain] || '';
-    $('notes-status').textContent = '';
-    $('notes-status').classList.remove('saved');
-  });
-}
-
-function scheduleNotesSave() {
-  const input = $('notes-input');
-  const domain = currentDomain;
-  if (!domain) return;
-  const value = input.value;
-  if (notesTimer) clearTimeout(notesTimer);
-  notesTimer = setTimeout(async () => {
-    notesTimer = null;
-    const map = await getSiteNotes();
-    if (value.trim()) map[domain] = value;
-    else delete map[domain];
-    await setSiteNotes(map);
-    const el = $('notes-status');
-    el.textContent = 'Saved';
-    el.classList.add('saved');
-  }, 600);
-}
-
-$('notes-toggle').addEventListener('click', () => {
-  const section = $('notes-section');
-  const open = section.classList.toggle('open');
-  $('notes-body').classList.toggle('hidden', !open);
-});
-$('notes-input').addEventListener('input', scheduleNotesSave);
 
 function brandFromUrl(url) {
   try {
@@ -413,7 +390,6 @@ async function runScrape(req) {
       setType(currentRows[0].hasOwnProperty('Type') ? 'variable' : 'simple');
     }
     const brand = res.brand || brandFromUrl(req.url || '');
-    currentRows.forEach(r => { r.tags = brand; r['Product URL'] = req.url || ''; });
     // Show the detected type only for known/listed sites.
     if (brand && currentRows.length > 0) {
       const badge = $('type-badge');
@@ -441,20 +417,25 @@ function buildReySwatches(parentRow, rows) {
   const attrName = (parentRow['Attribute 1 name'] || 'Color').toLowerCase();
   const parentRef = `id:${parentRow.ID}`;
   const variations = rows.filter(r => r.Type === 'variation' && r.Parent === parentRef);
-  const isImageSwatch = variations.some(v => (v['Color Code'] || '').trim().startsWith('http'));
+  // Swatches are driven by the DATA, not the attribute name: if any variant
+  // carries a hex code or a swatch image URL, this is a swatched attribute.
+  const hasImage = variations.some(v => (v['Color Code'] || '').trim().startsWith('http'));
+  const hasHex = variations.some(v => (v['Color Code'] || '').trim().startsWith('#'));
+  if (!hasImage && !hasHex) return '';
   const terms = {};
   for (const v of variations) {
     const colorName = v['Attribute 1 value(s)'];
     const cc = (v['Color Code'] || '').trim();
     if (!colorName) continue;
-    terms[colorName] = isImageSwatch
+    terms[colorName] = hasImage
       ? { name: colorName, rey_attribute_image: cc }
       : { name: colorName, rey_attribute_color: cc || '#000000' };
   }
-  if (isImageSwatch) return JSON.stringify({ Image: { name: 'Image', type: 'rey_image', terms } });
-  // Only generate color swatches when the attribute is "Color"
-  if (attrName.toLowerCase() !== 'color') return '';
-  return JSON.stringify({ [attrName]: { name: attrName, type: 'rey_color', terms } });
+  if (hasImage) return JSON.stringify({ Image: { name: 'Image', type: 'rey_image', terms } });
+  // Hex swatches: use the attribute name when it's meaningful, else fall back
+  // to "color" (so generic names like "option" still produce color swatches).
+  const key = (attrName && attrName !== 'option') ? attrName : 'color';
+  return JSON.stringify({ [key]: { name: key, type: 'rey_color', terms } });
 }
 
 // ═══ Render results table ═════════════════════════════════════════════════════
@@ -786,3 +767,10 @@ chrome.tabs.onUpdated.addListener((tabId, info) => {
   if (info.status === 'complete' || info.url) refreshScraperStatus();
 });
 refreshScraperStatus();
+
+// Show the real loaded version so you can tell at a glance which build this is.
+try {
+  $('version-badge').textContent = 'v' + chrome.runtime.getManifest().version;
+} catch (e) {
+  $('version-badge').textContent = '';
+}
