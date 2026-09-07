@@ -16,6 +16,7 @@ let currentHasVariable = false; // whether a variable scraper exists for it
 let pendingType = '';         // 'simple' | 'variable' for the AI scraper being built
 let pendingBody = '';         // the generated (unsaved) scraper code
 let pendingUrl = '';          // URL used for generation
+let pendingAttr = { count: null, attr1: '', attr2: '' }; // attribute hints for variable scrapers
 let chatHistory = [];         // [{role:'user'|'agent', content}] for the fix chat
 
 const $ = id => document.getElementById(id);
@@ -108,13 +109,14 @@ function updateHeroButtons() {
 // Reset transient state before starting a fresh scrape / generation.
 function resetForNewScrape() {
   hideSaveRow();
-  hideDeepThink();
-  hideChat();
   hideTypeSelector();
+  hideAttrConfig();
+  hideChat();
   hideAgentWorking();
   pendingBody = '';
   pendingType = '';
   pendingUrl = '';
+  pendingAttr = { count: null, attr1: '', attr2: '' };
   chatHistory = [];
 }
 
@@ -148,7 +150,7 @@ function setAgentThought(text) {
 function showAgentWorking() { $('agent-working').classList.remove('hidden'); setAgentThought(''); }
 function hideAgentWorking() { $('agent-working').classList.add('hidden'); setAgentThought(''); }
 
-// Cancel while the agent is working (generation or chat fix).
+// Cancel while the agent is working (generation).
 $('agent-cancel-btn').addEventListener('click', () => {
   chrome.runtime.sendMessage({ type: 'cancelGenerate' });
   status('warn', 'Cancelling…');
@@ -185,22 +187,84 @@ function showTypeSelector() {
 function hideTypeSelector() { $('type-selector').classList.add('hidden'); }
 
 $('type-simple-btn').addEventListener('click', () => startAddScraper('simple'));
-$('type-variable-btn').addEventListener('click', () => startAddScraper('variable'));
+$('type-variable-btn').addEventListener('click', () => showAttrConfig());
 
-async function startAddScraper(type) {
+// ═══ Attribute config (variable products) — optional step ═════════════════════
+function showAttrConfig() {
+  $('type-selector').classList.add('hidden');
+  $('attr-config').classList.remove('hidden');
+  $('attr-name-1').classList.add('hidden');
+  $('attr-name-2').classList.add('hidden');
+  $('attr-done-btn').classList.add('hidden');
+  $('attr-count-1-btn').classList.remove('selected');
+  $('attr-count-2-btn').classList.remove('selected');
+  $('attr-name-1-input').value = '';
+  $('attr-name-2-input').value = '';
+  clearChips(1);
+  clearChips(2);
+}
+function hideAttrConfig() { $('attr-config').classList.add('hidden'); }
+
+function clearChips(n) {
+  document.querySelectorAll('.chip[data-attr="' + n + '"]').forEach(c => c.classList.remove('selected'));
+}
+
+function setAttrCount(n) {
+  pendingAttr.count = n;
+  $('attr-name-1').classList.toggle('hidden', n < 1);
+  $('attr-name-2').classList.toggle('hidden', n < 2);
+  $('attr-done-btn').classList.remove('hidden');
+  $('attr-count-1-btn').classList.toggle('selected', n === 1);
+  $('attr-count-2-btn').classList.toggle('selected', n === 2);
+}
+
+document.querySelectorAll('.chip').forEach(chip => chip.addEventListener('click', () => {
+  const n = Number(chip.dataset.attr);
+  clearChips(n);
+  chip.classList.add('selected');
+  $('attr-name-' + n + '-input').value = chip.dataset.name;
+}));
+
+document.querySelectorAll('.attr-name-input').forEach(inp => inp.addEventListener('input', () => {
+  // Manual typing overrides the chip selection.
+  const n = inp.id === 'attr-name-1-input' ? 1 : 2;
+  clearChips(n);
+}));
+
+$('attr-count-1-btn').addEventListener('click', () => setAttrCount(1));
+$('attr-count-2-btn').addEventListener('click', () => setAttrCount(2));
+
+$('attr-skip-btn').addEventListener('click', () => {
+  pendingAttr = { count: null, attr1: '', attr2: '' };
+  startAddScraper('variable', pendingAttr);
+});
+
+$('attr-done-btn').addEventListener('click', () => {
+  pendingAttr.attr1 = $('attr-name-1-input').value.trim();
+  pendingAttr.attr2 = $('attr-name-2-input').value.trim();
+  startAddScraper('variable', pendingAttr);
+});
+
+async function startAddScraper(type, attr) {
   const tab = await activeTab();
   if (!tab) return status('error', 'No active tab.');
   hideTypeSelector();
+  hideAttrConfig();
   pendingType = type;
   pendingUrl = tab.url;
-  chatHistory = [];
   hideSaveRow();
-  hideDeepThink();
-  hideChat();
   showAgentWorking();
   status('loading', 'The AI is building a ' + (type === 'variable' ? 'variable' : 'simple') + ' scraper for this site…');
   try {
-    const res = await chrome.runtime.sendMessage({ type: 'generateScraper', tabId: tab.id, url: tab.url, productType: type });
+    const res = await chrome.runtime.sendMessage({
+      type: 'generateScraper',
+      tabId: tab.id,
+      url: tab.url,
+      productType: type,
+      attrCount: attr && attr.count != null ? attr.count : null,
+      attr1: attr && attr.attr1 ? attr.attr1 : '',
+      attr2: attr && attr.attr2 ? attr.attr2 : '',
+    });
     if (chrome.runtime.lastError) throw new Error(chrome.runtime.lastError.message);
     if (res && res.cancelled) { hideAgentWorking(); status('warn', 'Cancelled.'); return; }
     if (!res || !res.ok) throw new Error((res && res.error) || 'Generation failed');
@@ -212,7 +276,7 @@ async function startAddScraper(type) {
     $('status').classList.add('hidden');
     renderResults(res.title || '');
     showSaveRow();
-    showDeepThink();
+    openChat();
   } catch (e) {
     hideAgentWorking();
     status('error', e.message);
@@ -221,33 +285,30 @@ async function startAddScraper(type) {
 
 function status(type, msg) { const el = $('status'); el.className = `status ${type}`; el.textContent = msg; el.classList.remove('hidden'); }
 
-// ═══ Save row (shown after the AI scraper is generated) ══════════════════════
-function showSaveRow() { $('save-row').classList.remove('hidden'); }
-function hideSaveRow() { $('save-row').classList.add('hidden'); }
-
-// ═══ Deep re-analysis ("Use deep thinking") → opens the conversational chat ═══
-function showDeepThink() { $('deep-think').classList.remove('hidden'); }
-function hideDeepThink() { $('deep-think').classList.add('hidden'); }
-
-$('deep-think-btn').addEventListener('click', () => {
-  hideDeepThink();
-  openChat();
-});
-
 // ═══ Conversational chat to fix the scraped data ══════════════════════════════
 function openChat() {
   if (!pendingBody) return;
-  hideDeepThink();
   $('chat-panel').classList.remove('hidden');
+  $('chat-panel').classList.remove('collapsed');
   $('chat-messages').innerHTML = '';
-  addChatMessage('agent', 'I scraped this ' + (pendingType === 'variable' ? 'variable' : 'simple') + ' product — the table shows what I found. Tell me what looks wrong (wrong price, missing variants, wrong images, etc.) and I\'ll look into it.');
+  chatHistory = [];
+  addChatMessage('agent', 'I scraped this ' + (pendingType === 'variable' ? 'variable' : 'simple') + ' product — the table shows what I found. Tell me what you need and I\'ll fix it.');
   $('chat-status').className = 'status hidden';
-  $('save-row').classList.remove('hidden');
+  $('chat-input').focus();
 }
 
 function hideChat() {
   $('chat-panel').classList.add('hidden');
 }
+
+// Fold / unfold the chat panel via its header (and the toggle button).
+$('chat-toggle').addEventListener('click', () => {
+  $('chat-panel').classList.toggle('collapsed');
+});
+$('chat-toggle-btn').addEventListener('click', (e) => {
+  e.stopPropagation(); // the header click already toggles; avoid double-toggle
+  $('chat-panel').classList.toggle('collapsed');
+});
 
 function addChatMessage(role, content) {
   const wrap = $('chat-messages');
@@ -288,10 +349,10 @@ async function sendChat() {
       tabId: tab.id,
       url: pendingUrl || tab.url,
       productType: pendingType,
-      feedback: text,
-      history: chatHistory.slice(0, -1),
       body: pendingBody,
       rows: currentRows,
+      history: chatHistory.slice(0, -1),
+      message: text,
     });
     if (chrome.runtime.lastError) throw new Error(chrome.runtime.lastError.message);
     if (res && res.cancelled) { chatStatus('warn', 'Cancelled.'); return; }
@@ -317,6 +378,10 @@ async function sendChat() {
 
 $('chat-send-btn').addEventListener('click', sendChat);
 $('chat-input').addEventListener('keydown', e => { if (e.key === 'Enter') sendChat(); });
+
+// ═══ Save row (shown after the AI scraper is generated) ══════════════════════
+function showSaveRow() { $('save-row').classList.remove('hidden'); }
+function hideSaveRow() { $('save-row').classList.add('hidden'); }
 
 // ═══ Add to scrappers (save) ══════════════════════════════════════════════════
 $('add-to-scrapers-btn').addEventListener('click', async () => {
@@ -349,15 +414,15 @@ $('cancel-scraper-btn').addEventListener('click', resetToHero);
 
 function resetToHero() {
   hideSaveRow();
-  hideDeepThink();
-  hideChat();
   hideTypeSelector();
+  hideAttrConfig();
+  hideChat();
   hideAgentWorking();
   pendingBody = '';
   pendingType = '';
   pendingUrl = '';
-  chatHistory = [];
   currentRows = [];
+  chatHistory = [];
   $('results').classList.add('hidden');
   $('type-badge').classList.add('hidden');
   $('status').classList.add('hidden');

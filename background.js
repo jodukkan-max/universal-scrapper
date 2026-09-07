@@ -16,7 +16,7 @@ chrome.storage.local.get('customScrapers').then(({ customScrapers }) => {
   }
 });
 
-// Cancellation of an in-flight AI generation/chat-fix (the user taps "Cancel"
+// Cancellation of an in-flight AI generation (the user taps "Cancel"
 // while the agent is working). The AbortController threads through to the
 // DeepSeek fetch so the long request aborts immediately.
 let cancelRequested = false;
@@ -28,8 +28,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     try {
       if (msg.type === 'scrape') sendResponse(await handleScrape(msg));
       else if (msg.type === 'generateScraper') sendResponse(await generateScraper(msg));
-      else if (msg.type === 'deepReanalyze') sendResponse(await deepReanalyze(msg));
       else if (msg.type === 'chatFixScraper') sendResponse(await chatFixScraper(msg));
+      else if (msg.type === 'deepReanalyze') sendResponse(await deepReanalyze(msg));
       else if (msg.type === 'saveScraper') sendResponse(await saveScraper(msg));
       else if (msg.type === 'cancelGenerate') { cancelRequested = true; if (currentGenAbort) currentGenAbort.abort(); sendResponse({ ok: true }); }
       else if (msg.type === 'wcTest') sendResponse(await wcTest(msg));
@@ -135,8 +135,8 @@ async function wcImport({ store, authKey, csv, skipResize }) {
 // in the function secret, never in the extension).
 const DS_FLASH = 'deepseek-v4-flash';
 
-async function callDeepSeek(messages, { json, onReasoning, signal, thinking, timeoutMs } = {}) {
-  const res = await self.Supabase.deepseek(messages, { json, signal, thinking, timeoutMs });
+async function callDeepSeek(messages, { json, onReasoning, signal, thinking, timeoutMs, model, reasoningEffort } = {}) {
+  const res = await self.Supabase.deepseek(messages, { json, signal, thinking, timeoutMs, model, reasoning_effort: reasoningEffort });
   if (res.cancelled) { const e = new Error('cancelled'); e.cancelled = true; throw e; }
   if (!res.ok) throw new Error(res.error || ('DeepSeek HTTP ' + res.status));
   const data = res.data || {};
@@ -161,7 +161,7 @@ async function getTabHtml(tabId) {
   return result || '';
 }
 
-// Live "agent thinking" line — shown while the AI works (generation + chat fixes).
+// Live "agent thinking" line — shown while the AI works (generation).
 function sendThinking(text) {
   try { chrome.runtime.sendMessage({ type: 'agentThinking', text: String(text || '') }).catch(() => {}); }
   catch (e) {}
@@ -438,7 +438,7 @@ Return exactly one JSON object (no markdown, no explanation, no code fences) wit
 
 HOW TO WORK: read the JSON-LD BLOCKS and INLINE JSON BLOCKS first — on modern stores the name, price, images and description live there. Only if a field is missing there, read the PRODUCT HTML near the title / "add to cart" area. Never return an empty field when the data exists anywhere in the HTML. Decode HTML entities in text.`;
 
-const VARIANTS_SYSTEM = `You are an expert product-data extractor. You are given the HTML of a VARIABLE product page (a product that comes in multiple variants). Extract the attributes and every variant, and return them as ONE JSON object.
+const VARIANTS_SYSTEM = (constraint) => `You are an expert product-data extractor. You are given the HTML of a VARIABLE product page (a product that comes in multiple variants). Extract the attributes and every variant, and return them as ONE JSON object.
 
 Return exactly one JSON object (no markdown, no explanation, no code fences) with this shape:
 { "optionName": "", "optionName2": "", "variants": [ { "name": "", "name2": "", "sku": "", "regularPrice": "", "images": [""], "colorCode": "" } ] }
@@ -453,7 +453,9 @@ Return exactly one JSON object (no markdown, no explanation, no code fences) wit
   * images: that option's own photos (first = main); [] if it has no distinct photo.
   * colorCode: the colour swatch for this option — a hex colour (e.g. "#000000") if the page gives one, OR the swatch image URL if the option uses an image swatch; else "". CRITICAL: when the product varies by colour, ALWAYS fill colorCode — look for the swatch element's background colour (inline style "background:#hex" or "background-color:#hex") or its background-image URL. This drives colour swatches on import, so do not leave it empty when the page provides it.
 
-HOW TO WORK: read the JSON-LD BLOCKS (offers / hasVariant) and INLINE JSON BLOCKS (e.g. product.variants, data-product_variations) first; otherwise read the swatch buttons / <option> / radio elements in the PRODUCT HTML — swatch colour codes usually live in the swatch element's inline style or a data attribute (e.g. data-color, data-swatch, style="background:#hex"). Real http(s) URLs only. Don't copy one variant's price or photo across all variants.`;
+HOW TO WORK: read the JSON-LD BLOCKS (offers / hasVariant) and INLINE JSON BLOCKS (e.g. product.variants, data-product_variations) first; otherwise read the swatch buttons / <option> / radio elements in the PRODUCT HTML — swatch colour codes usually live in the swatch element's inline style or a data attribute (e.g. data-color, data-swatch, style="background:#hex"). Real http(s) URLs only. Don't copy one variant's price or photo across all variants.
+
+${constraint ? 'STRICT CONSTRAINT FROM THE USER — this OVERRIDES anything you see in the HTML:\n' + constraint : ''}`;
 
 const CODE_SYSTEM = (type) => `You are an expert web scraper. Write ONE reusable JavaScript function for a Chrome extension that extracts a ${type === 'variable' ? 'variable' : 'simple'} product's data from a product page's HTML.
 
@@ -470,59 +472,6 @@ ${type === 'simple'
   : 'Return { rows: variableRows(title, parentImages, description, categories, optionName, variants, optionName2), title }. variableRows(...) already returns an array — assign it directly, do NOT wrap it in another [ ]. Each variant object: { name, name2, sku, regularPrice, images, extras, colorCode }. Include all variants regardless of stock.'}
 
 RULES: pure JS + regex + JSON + the helpers only (no document/window/DOM). fmtPrice() every price. Real http(s) image URLs only.`;
-
-// ── Conversational chat system prompt ─────────────────────────────────────────
-// The chat agent is a real conversational assistant: it talks to the user in
-// plain language AND, when the user asks for a data change, supplies a corrected
-// scraper in a separate section. We use a delimited two-section format (not
-// JSON mode) because the corrected code can be several KB — larger than the
-// 1024-token cap the edge function applies to JSON responses.
-const CHAT_SYSTEM = (type) => `You are a friendly, expert scraper engineer in a live chat with a user who is refining a scraper for a product page. Talk to them like a helpful, natural colleague — like a human expert, not a script.
-
-Each turn you receive: the product page HTML, the current scraper code, the current scraped data (what the table shows), and the full conversation so far.
-
-How to behave:
-- Reason about the page and the current data. Acknowledge what the user said in your own words.
-- Reply in natural prose. You may answer questions, explain what you found, or ask ONE short clarifying question when the user's report is ambiguous (e.g. "which variant is wrong?" or "do you mean the image or the price?").
-- You do NOT have to change the scraper every turn. Only when you are confident the scraper should change, include the full corrected function as a JavaScript code block in your reply.
-- When you do change it, briefly say what you fixed and why.
-
-Helpers available inside any scraper you write (do NOT redefine them):
-- decodeEntities(s), ldBlocks(html), normalizeShopUrl(src), fmtPrice(p)
-- simpleRow({ sku, name, description, regularPrice, categories, images })
-- variableRows(title, parentImages, description, categories, optionName, variants, optionName2)
-
-A corrected scraper must return { rows, title }, building rows ONLY via simpleRow(...) (simple) or variableRows(...) (variable). Use only pure JS + regex + JSON + the helpers (no document/window/DOM). Never emit a value containing "$", "{" or "}" as an image URL — only real http(s) URLs. Short descriptions are NOT collected. This is a ${type === 'variable' ? 'variable' : 'simple'} product.
-
-When you change the scraper, wrap the full corrected function in a code block like:
-\`\`\`javascript
-async function run(ctx) { ... }
-\`\`\``;
-
-// Parse the agent's natural reply into { reply, code }. Instead of demanding a
-// rigid two-section template, we extract a corrected run() function IF the model
-// chose to write one (inside a fenced code block or as a bare function), and
-// treat everything else as the conversational reply.
-function parseChatReply(text) {
-  const s = String(text || '').trim();
-  let code = '';
-  let reply = s;
-
-  // 1) Prefer a fenced code block containing an async function run().
-  const fence = s.match(/```(?:javascript|js)?\s*([\s\S]*?)```/i);
-  if (fence && /async\s+function\s+run\s*\(/.test(fence[1])) {
-    code = fence[1];
-    reply = (s.slice(0, fence.index) + ' ' + s.slice(fence.index + fence[0].length)).trim();
-  } else if (/async\s+function\s+run\s*\(/.test(s)) {
-    // 2) Fallback: the whole reply is just the function (no prose).
-    code = s;
-    reply = '';
-  }
-
-  code = code.replace(/^\s*```[\w]*\s*/i, '').replace(/\s*```\s*$/, '').trim();
-  if (/^NONE$/i.test(code)) code = '';
-  return { reply: reply || (code ? '' : 'Done.'), code };
-}
 
 // Runs a generated scraper body in the page's MAIN world. `new Function` (eval)
 // is forbidden in MV3 extension pages/service workers (no 'unsafe-eval'), but is
@@ -658,7 +607,44 @@ function describeRows(rows) {
 //   Step 1 — core fields (name, description, images, price, categories, sku)
 //   Step 2 — variants (variable products only)
 //   Step 3 — a reusable run() scraper, written from the data above, for saving.
-async function generateScraper({ tabId, url, productType }) {
+
+// Build a STRICT constraint from the user's attribute-config answers (how many
+// attributes, and their names). Injected into the variants system prompt AND
+// enforced deterministically after extraction, so the user's choice always wins.
+function buildAttrConstraint(count, attr1, attr2) {
+  const lines = [];
+  if (count === 1) {
+    lines.push('This product has EXACTLY ONE attribute. Do NOT return a second attribute.');
+    if (attr1) lines.push('That single attribute is named "' + attr1 + '" — set optionName to exactly "' + attr1 + '", leave optionName2 EMPTY, and leave every variant\'s name2 EMPTY.');
+  } else if (count === 2) {
+    lines.push('This product has EXACTLY TWO attributes.');
+    if (attr1) lines.push('Attribute 1 is "' + attr1 + '" — set optionName to exactly "' + attr1 + '".');
+    if (attr2) lines.push('Attribute 2 is "' + attr2 + '" — set optionName2 to exactly "' + attr2 + '".');
+  }
+  if (!lines.length) return '';
+  return lines.join('\n');
+}
+
+// Deterministic safety net: force the extracted variants to match the user's
+// attribute count/names, so even if the model ignores the prompt the result is
+// still correct. "1 attribute" blanks the second attribute entirely.
+function enforceAttrConstraint(variants, count, attr1, attr2) {
+  if (!variants || typeof variants !== 'object') return variants;
+  const v = Object.assign({}, variants);
+  if (count === 1) {
+    if (attr1) v.optionName = attr1;
+    v.optionName2 = '';
+    if (Array.isArray(v.variants)) {
+      v.variants = v.variants.map((x) => Object.assign({}, x, { name2: '' }));
+    }
+  } else if (count === 2) {
+    if (attr1) v.optionName = attr1;
+    if (attr2) v.optionName2 = attr2;
+  }
+  return v;
+}
+
+async function generateScraper({ tabId, url, productType, attrCount, attr1, attr2 }) {
   const effectiveType = productType === 'variable' ? 'variable' : 'simple';
   cancelRequested = false;
   const ctrl = new AbortController();
@@ -682,8 +668,9 @@ async function generateScraper({ tabId, url, productType }) {
     let variants = null;
     if (effectiveType === 'variable') {
       sendThinking('Step 2/3: reading variants and attributes…');
+      const constraint = buildAttrConstraint(attrCount, attr1, attr2);
       const varRaw = await callDeepSeek([
-        { role: 'system', content: VARIANTS_SYSTEM },
+        { role: 'system', content: VARIANTS_SYSTEM(constraint) },
         { role: 'user', content: ctxUser },
       ], { signal: ctrl.signal });
       if (cancelRequested) return { cancelled: true };
@@ -691,6 +678,7 @@ async function generateScraper({ tabId, url, productType }) {
       if (!variants || !Array.isArray(variants.variants) || !variants.variants.length) {
         throw new Error('The AI could not find variants for this product. It may actually be a simple product.');
       }
+      variants = enforceAttrConstraint(variants, attrCount, attr1, attr2);
     }
 
     // Reconstruct normalized rows from the extracted data (deterministic, and
@@ -715,6 +703,137 @@ async function generateScraper({ tabId, url, productType }) {
     const body = /async\s+function\s+run\s*\(/.test(runBody) ? buildScraperBody(runBody) : dataBody;
 
     return { ok: true, rows, title: dataRes.title || core.name || '', body, type: effectiveType };
+  } finally {
+    if (currentGenAbort === ctrl) currentGenAbort = null;
+  }
+}
+
+// ── Conversational scraper chat ──────────────────────────────────────────────
+// A real, multi-turn assistant the user talks to in natural language. It can
+// answer questions AND, when the user asks for a data change, rewrite the
+// scraper and re-run it to update the table. Reasoning ("thinking") is ON and
+// the FULL conversation is threaded into every call, so it remembers context
+// like a real colleague — no rigid prompt or fixed format from the user.
+const CHAT_SYSTEM = (type) => `You are a friendly, expert scraper engineer chatting live with a user who just scraped a ${type === 'variable' ? 'variable' : 'simple'} product and wants to discuss or fix the results.
+
+You receive each turn: the product page HTML, the current scraper code, the current scraped data (what the table shows), and the full conversation so far. You remember everything already said.
+
+Behave like a real, natural colleague:
+- Read what the user actually said and respond in plain, conversational prose. Never give a canned or scripted reply.
+- You can answer questions, explain what you found in the data, or ask ONE short clarifying question when their report is ambiguous.
+- You only need to change the scraper when the user wants the DATA changed. When you are confident a change is needed, write the FULL corrected run() function in a single fenced javascript code block, and briefly say what you fixed and why.
+- Reason carefully over the page and the current data before deciding.
+
+The corrected scraper must return { rows, title }, building rows ONLY via simpleRow(...) (simple) or variableRows(...) (variable). Use only pure JS + regex + JSON + the helpers (no document/window/DOM). Real http(s) image URLs only — never a value containing "$", "{" or "}" as an image URL. Short descriptions are NOT collected.
+
+Helpers in scope (do NOT redefine them): decodeEntities(s), ldBlocks(html), normalizeShopUrl(src), fmtPrice(p), simpleRow(obj), variableRows(title, parentImages, description, categories, optionName, variants, optionName2).
+
+When you change the scraper, wrap the full function like:
+\`\`\`javascript
+async function run(ctx) { ... }
+\`\`\``;
+
+// Parse the agent's natural reply into { reply, code }. We extract a corrected
+// run() function IF the model wrote one (inside a fenced code block or as a
+// bare function), and treat everything else as the conversational reply.
+function parseChatReply(text) {
+  const s = String(text || '').trim();
+  let code = '';
+  let reply = s;
+
+  const fence = s.match(/```(?:javascript|js)?\s*([\s\S]*?)```/i);
+  if (fence && /async\s+function\s+run\s*\(/.test(fence[1])) {
+    code = fence[1];
+    reply = (s.slice(0, fence.index) + ' ' + s.slice(fence.index + fence[0].length)).trim();
+  } else if (/async\s+function\s+run\s*\(/.test(s)) {
+    code = s;
+    reply = '';
+  }
+
+  code = code.replace(/^\s*```[\w]*\s*/i, '').replace(/\s*```\s*$/, '').trim();
+  if (/^NONE$/i.test(code)) code = '';
+  return { reply: reply || '', code };
+}
+
+async function chatFixScraper({ tabId, url, productType, body, rows, history, message }) {
+  const effectiveType = productType === 'variable' ? 'variable' : 'simple';
+  cancelRequested = false;
+  const ctrl = new AbortController();
+  currentGenAbort = ctrl;
+  try {
+    const html = await getTabHtml(tabId);
+    const sample = scraperHtmlSample(html);
+
+    const prior = (history || [])
+      .filter(m => m && m.role && m.content)
+      .map(m => (m.role === 'assistant' ? 'Agent: ' : 'User: ') + String(m.content))
+      .join('\n');
+
+    const currentDump = (Array.isArray(rows) && rows.length) ? describeRows(rows) : '(no data yet)';
+
+    const messages = [
+      { role: 'system', content: CHAT_SYSTEM(effectiveType) },
+      { role: 'user', content: 'Product page URL: ' + url + '\n\n' + sample
+        + (body ? '\n\nCurrent scraper code (for reference):\n' + body : '')
+        + '\n\nCurrent scraped data (what the table shows):\n' + currentDump
+        + (prior ? '\n\nConversation so far (for memory):\n' + prior : '')
+        + '\n\nThe user just said:\n' + (message || '')
+      },
+    ];
+
+    if (cancelRequested) return { cancelled: true };
+    sendThinking('The agent is thinking…');
+
+    // Reasoning ON with the frontier model (deepseek-v4-pro) so the agent truly
+    // thinks and analyses the table, not just replies fast. Bounded timeout, live
+    // "thinking" feed. On timeout we re-issue the SAME message once (full history
+    // + context is already in it), so the agent resumes where it stopped.
+    const deepCall = () => callDeepSeek(messages, {
+      signal: ctrl.signal,
+      thinking: true,
+      model: 'deepseek-v4-pro',
+      reasoningEffort: 'high',
+      timeoutMs: 90000,
+      onReasoning: (r) => sendThinking(trimThinking(r)),
+    });
+    let raw;
+    try {
+      raw = await deepCall();
+    } catch (e) {
+      if (e && e.cancelled) return { cancelled: true };
+      if (/timed out/i.test(e.message || '')) {
+        sendThinking('Thinking stalled — resuming from where it stopped…');
+        raw = await deepCall();
+      } else {
+        throw e;
+      }
+    }
+    if (cancelRequested) return { cancelled: true };
+
+    const { reply, code } = parseChatReply(raw);
+
+    // No corrected code → it was just answering / asking / explaining.
+    if (!code) {
+      return { ok: true, reply: reply || 'Understood.', changed: false };
+    }
+
+    const runBody = stripFences(code);
+    if (!/async\s+function\s+run\s*\(/.test(runBody)) {
+      return { ok: false, error: 'The agent produced invalid scraper code — please ask it again.' };
+    }
+
+    sendThinking('Running the updated scraper against the page…');
+    const newBody = buildScraperBody(runBody);
+    const res = await runScraperInPage(tabId, newBody, effectiveType, html);
+    if (cancelRequested) return { cancelled: true };
+    if (!res.ok) {
+      const note = reply
+        ? reply + '\n\nHeads-up: I tried to apply that change, but the scraper threw an error — ' + (res.error || 'unknown') + '. Tell me to fix it and I will.'
+        : 'I tried to update the scraper, but it threw an error: ' + (res.error || 'unknown') + '.';
+      return { ok: true, reply: note, changed: false };
+    }
+
+    return { ok: true, reply: reply || 'Done.', changed: true, rows: res.rows, title: res.title, body: newBody };
   } finally {
     if (currentGenAbort === ctrl) currentGenAbort = null;
   }
@@ -766,7 +885,7 @@ async function deepReanalyze({ tabId, url, productType }) {
     let variants = null;
     if (effectiveType === 'variable') {
       sendThinking('Deep 2/3: analyzing variants and attributes…');
-      variants = extractJson(await withResume(VARIANTS_SYSTEM, ctxUser + '\n\nCore data already found (keep it, only add/fix variants):\n' + JSON.stringify(core)));
+      variants = extractJson(await withResume(VARIANTS_SYSTEM(''), ctxUser + '\n\nCore data already found (keep it, only add/fix variants):\n' + JSON.stringify(core)));
       if (cancelRequested) return { cancelled: true };
       if (!variants || !Array.isArray(variants.variants) || !variants.variants.length) {
         throw new Error('Deep thinking could not find variants. It may be a simple product.');
@@ -797,92 +916,8 @@ async function deepReanalyze({ tabId, url, productType }) {
   }
 }
 
-// ── Conversational scraper chat ──────────────────────────────────────────────
-// The agent is a real conversational assistant. It replies in natural language
-// and, when the user asks for a data change, also returns a corrected run()
-// function in a separate section. We keep the page sample + current code + the
-// current scraped rows + full chat history as context so it can answer
-// questions AND fix scrapers, then re-run the code when it provided one.
-async function chatFixScraper({ tabId, url, productType, feedback, history, body, rows }) {
-  const effectiveType = productType === 'variable' ? 'variable' : 'simple';
-  cancelRequested = false;
-  const ctrl = new AbortController();
-  currentGenAbort = ctrl;
-  try {
-    const html = await getTabHtml(tabId);
-    const sample = scraperHtmlSample(html);
-
-    const prior = (history || [])
-      .filter(m => m && m.role && m.content)
-      .map(m => (m.role === 'assistant' ? 'Agent: ' : 'User: ') + String(m.content))
-      .join('\n');
-
-    const currentDump = (Array.isArray(rows) && rows.length) ? describeRows(rows) : '(no data yet)';
-
-    const messages = [
-      { role: 'system', content: CHAT_SYSTEM(effectiveType) },
-      { role: 'user', content: 'Product page URL: ' + url + '\n\n' + sample
-        + (body ? '\n\nCurrent scraper code (for reference):\n' + body : '')
-        + '\n\nCurrent scraped data (what the table shows):\n' + currentDump
-        + (prior ? '\n\nConversation so far (for context):\n' + prior : '')
-        + '\n\nThe user just said:\n' + feedback
-      },
-    ];
-
-    if (cancelRequested) return { cancelled: true };
-    sendThinking('The agent is thinking…');
-
-    // Deep reasoning ON, bounded timeout, live "thinking" feed. On timeout we
-    // re-issue the SAME message once (the full history + context is already in
-    // it), so the agent resumes where it stopped instead of losing the thread.
-    const deepCall = () => callDeepSeek(messages, {
-      signal: ctrl.signal,
-      thinking: true,
-      timeoutMs: 60000,
-      onReasoning: (r) => sendThinking(trimThinking(r)),
-    });
-    let raw;
-    try {
-      raw = await deepCall();
-    } catch (e) {
-      if (e && e.cancelled) return { cancelled: true };
-      if (/timed out/i.test(e.message || '')) {
-        sendThinking('Thinking stalled — resuming from where it stopped…');
-        raw = await deepCall();
-      } else {
-        throw e;
-      }
-    }
-    if (cancelRequested) return { cancelled: true };
-
-    const { reply, code } = parseChatReply(raw);
-
-    // No corrected code → it was just answering / asking / explaining.
-    if (!code) {
-      return { ok: true, reply, changed: false };
-    }
-
-    const runBody = stripFences(code);
-    if (!/async\s+function\s+run\s*\(/.test(runBody)) {
-      return { ok: false, error: 'The agent produced invalid scraper code — please ask it again.' };
-    }
-
-    sendThinking('Running the updated scraper against the page…');
-    const newBody = buildScraperBody(runBody);
-    const res = await runScraperInPage(tabId, newBody, effectiveType, html);
-    if (cancelRequested) return { cancelled: true };
-    if (!res.ok) {
-      return { ok: false, error: 'The updated scraper threw an error: ' + (res.error || 'unknown') };
-    }
-
-    return { ok: true, reply, changed: true, rows: res.rows, title: res.title, body: newBody };
-  } finally {
-    if (currentGenAbort === ctrl) currentGenAbort = null;
-  }
-}
-
 // ── Save (or update) an AI-generated scraper for a site + product type ───────
-// Called when the user taps "Add to scrappers" after the chat. It upserts the
+// Called when the user taps "Add to scrappers". It upserts the
 // code under the chosen type (simple/variable), leaving the other type intact.
 async function saveScraper({ url, productType, body, example }) {
   const domain = domainOf(url);

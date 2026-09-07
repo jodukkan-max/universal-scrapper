@@ -35,6 +35,35 @@
             <button id="type-variable-btn" class="secondary-btn">Variable</button>
           </div>
         </div>
+        <div id="attr-config" class="attr-config hidden">
+          <div class="attr-config-q">How many attributes does this variable product have?</div>
+          <div class="attr-config-actions">
+            <button id="attr-count-1-btn" class="secondary-btn">1 attribute</button>
+            <button id="attr-count-2-btn" class="secondary-btn">2 attributes</button>
+            <button id="attr-skip-btn" class="secondary-btn">Skip</button>
+          </div>
+          <div id="attr-name-1" class="attr-name hidden">
+            <div class="attr-name-q">What is attribute 1?</div>
+            <div class="attr-chips">
+              <button class="chip" data-attr="1" data-name="Size">Size</button>
+              <button class="chip" data-attr="1" data-name="Color">Color</button>
+              <button class="chip" data-attr="1" data-name="Weight">Weight</button>
+              <button class="chip" data-attr="1" data-name="Type">Type</button>
+            </div>
+            <input id="attr-name-1-input" class="attr-name-input" type="text" placeholder="or write attribute name" autocomplete="off" />
+          </div>
+          <div id="attr-name-2" class="attr-name hidden">
+            <div class="attr-name-q">What is attribute 2?</div>
+            <div class="attr-chips">
+              <button class="chip" data-attr="2" data-name="Size">Size</button>
+              <button class="chip" data-attr="2" data-name="Color">Color</button>
+              <button class="chip" data-attr="2" data-name="Weight">Weight</button>
+              <button class="chip" data-attr="2" data-name="Type">Type</button>
+            </div>
+            <input id="attr-name-2-input" class="attr-name-input" type="text" placeholder="or write attribute name" autocomplete="off" />
+          </div>
+          <button id="attr-done-btn" class="primary-btn hidden">Continue</button>
+        </div>
         <div id="status" class="status hidden"></div>
       </div>
       <div id="agent-working" class="agent-working hidden">
@@ -76,20 +105,21 @@
       <button id="cancel-scraper-btn" class="secondary-btn">Cancel</button>
       <button id="add-to-scrapers-btn" class="primary-btn">Add to scrappers</button>
     </div>
-    <!-- Deep re-analysis for AI-generated scrapers -->
-    <div id="deep-think" class="deep-think hidden">
-      <div class="deep-think-label">Data is not correct?</div>
-      <button id="deep-think-btn" class="secondary-btn">Use deep thinking</button>
-    </div>
+
     <!-- Conversational chat to fix the scraped data -->
     <div id="chat-panel" class="chat-panel hidden">
-      <div class="chat-title">Chat with the AI about the data</div>
-      <div id="chat-messages" class="chat-messages"></div>
-      <div class="chat-input-row">
-        <input id="chat-input" type="text" placeholder="Tell me what's wrong (e.g. price is wrong / missing variants)" autocomplete="off" />
-        <button id="chat-send-btn">Send</button>
+      <div class="chat-head" id="chat-toggle">
+        <span class="chat-title">Tell me what you need</span>
+        <button id="chat-toggle-btn" class="chat-toggle-btn" type="button" title="Fold / unfold">–</button>
       </div>
-      <div id="chat-status" class="status hidden"></div>
+      <div class="chat-body" id="chat-body">
+        <div id="chat-messages" class="chat-messages"></div>
+        <div class="chat-input-row">
+          <input id="chat-input" type="text" placeholder="e.g. the price is wrong, or a variant is missing" autocomplete="off" />
+          <button id="chat-send-btn">Send</button>
+        </div>
+        <div id="chat-status" class="status hidden"></div>
+      </div>
     </div>
 
   </section>

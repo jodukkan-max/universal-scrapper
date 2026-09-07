@@ -178,15 +178,45 @@ body { margin: 0; font-family: 'Montserrat', -apple-system, BlinkMacSystemFont, 
 .type-selector-actions { display: flex; gap: 8px; }
 .type-selector-actions .secondary-btn { flex: 1; }
 
-/* ── AI chat (conversational scraper fixing) ────────────── */
-.chat-panel { margin-top: 14px; background: var(--surface);
-  border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; }
-.chat-title { font-size: 13px; font-weight: 500; color: var(--text); margin-bottom: 10px; }
-.chat-messages { display: flex; flex-direction: column; gap: 8px; max-height: 260px; overflow-y: auto; margin-bottom: 10px; }
+/* ── Attribute config (variable products only) ─────────── */
+.attr-config { width: 100%; padding: 12px; background: var(--surface);
+  border: 1px solid var(--border); border-radius: var(--radius); display: flex; flex-direction: column; gap: 10px; }
+.attr-config-q { font-size: 13px; font-weight: 500; color: var(--text); }
+.attr-config-actions { display: flex; gap: 8px; }
+.attr-config-actions .secondary-btn { flex: 1; }
+.attr-name { display: flex; flex-direction: column; gap: 8px; padding-top: 2px; }
+.attr-name-q { font-size: 12px; color: var(--muted); }
+.attr-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.attr-chips .chip { background: var(--surface2); color: var(--text); border: 1px solid var(--border);
+  border-radius: 999px; padding: 5px 12px; font-size: 12px; cursor: pointer; font-family: inherit; }
+.attr-chips .chip:hover { border-color: var(--accent); }
+.attr-chips .chip.selected { background: var(--accent); color: #fff; border-color: var(--accent); }
+.attr-name-input { background: var(--bg); border: 1px solid var(--border); color: var(--text);
+  border-radius: var(--radius); padding: 8px 10px; font-family: inherit; font-size: 12px; }
+.attr-name-input:focus { outline: none; border-color: var(--accent); }
+.attr-config .primary-btn { width: 100%; }
+
+/* ── Save / Cancel row ──────────────────────────────────── */
+.save-row { display: flex; gap: 8px; margin-top: 12px; }
+.save-row .primary-btn, .save-row .secondary-btn { flex: 1; width: auto; }
+
+/* ── Conversational chat (fix the scraped data) ─────────── */
+.chat-panel { margin-top: 14px; background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 0; overflow: hidden; }
+.chat-head { display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 12px; cursor: pointer; user-select: none; }
+.chat-head:hover { background: var(--surface2); }
+.chat-title { font-size: 13px; font-weight: 600; color: var(--text); }
+.chat-toggle-btn { background: transparent; border: none; color: var(--text); font-size: 16px;
+  line-height: 1; cursor: pointer; padding: 0 4px; transition: transform .15s ease; }
+.chat-panel.collapsed .chat-toggle-btn { transform: rotate(-90deg); }
+.chat-body { display: flex; flex-direction: column; gap: 10px; padding: 0 12px 12px; }
+.chat-panel.collapsed .chat-body { display: none; }
+.chat-messages { display: flex; flex-direction: column; gap: 8px; max-height: 260px; overflow-y: auto; }
 .chat-msg { display: flex; }
 .chat-msg.user { justify-content: flex-end; }
 .chat-msg.agent { justify-content: flex-start; }
-.chat-bubble { max-width: 85%; padding: 8px 11px; border-radius: 12px; font-size: 12px; line-height: 1.4; white-space: pre-wrap; word-break: break-word; }
+.chat-bubble { max-width: 85%; padding: 8px 11px; border-radius: 12px; font-size: 12px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; }
 .chat-msg.agent .chat-bubble { background: var(--surface2); color: var(--text); border: 1px solid var(--border); border-bottom-left-radius: 4px; }
 .chat-msg.user .chat-bubble { background: var(--accent); color: #fff; border-bottom-right-radius: 4px; }
 .chat-input-row { display: flex; gap: 6px; }
@@ -197,36 +227,7 @@ body { margin: 0; font-family: 'Montserrat', -apple-system, BlinkMacSystemFont, 
   padding: 0 14px; font-weight: 500; font-size: 13px; cursor: pointer; }
 .chat-input-row button:hover { background: var(--accent-hover); }
 .chat-input-row button:disabled { opacity: .5; cursor: not-allowed; }
-
-/* ── Save / Cancel row ──────────────────────────────────── */
-.save-row { display: flex; gap: 8px; margin-top: 12px; }
-.save-row .primary-btn, .save-row .secondary-btn { flex: 1; width: auto; }
-
-/* ── Deep re-analysis ("Data is not correct?") ──────────── */
-.deep-think { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; padding: 12px;
-  border: 1px dashed var(--border); border-radius: var(--radius); background: var(--surface); }
-.deep-think-label { font-size: 13px; font-weight: 500; color: var(--text); }
-.deep-think .secondary-btn { width: 100%; }
-
-/* ── Conversational chat (fix the scraped data) ─────────── */
-.chat-panel { margin-top: 14px; background: var(--surface); border: 1px solid var(--border);
-  border-radius: var(--radius); padding: 12px; }
-.chat-title { font-size: 13px; font-weight: 500; color: var(--text); margin-bottom: 10px; }
-.chat-messages { display: flex; flex-direction: column; gap: 8px; max-height: 260px; overflow-y: auto; margin-bottom: 10px; }
-.chat-msg { display: flex; }
-.chat-msg.user { justify-content: flex-end; }
-.chat-msg.agent { justify-content: flex-start; }
-.chat-bubble { max-width: 85%; padding: 8px 10px; border-radius: 10px; font-size: 12px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
-.chat-msg.user .chat-bubble { background: var(--accent); color: #fff; border-bottom-right-radius: 3px; }
-.chat-msg.agent .chat-bubble { background: var(--surface2); color: var(--text); border-bottom-left-radius: 3px; }
-.chat-input-row { display: flex; gap: 6px; }
-.chat-input-row input { flex: 1; background: var(--bg); border: 1px solid var(--border); color: var(--text);
-  border-radius: var(--radius); padding: 8px 10px; font-family: inherit; font-size: 12px; }
-.chat-input-row input:focus { outline: none; border-color: var(--accent); }
-.chat-input-row button { background: var(--accent); color: #fff; border: none; border-radius: var(--radius);
-  padding: 0 14px; cursor: pointer; font-family: inherit; font-size: 12px; }
-.chat-input-row button:hover { background: var(--accent-hover); }
-.chat-input-row button:disabled { opacity: .5; cursor: not-allowed; }
+.chat-typing { color: var(--muted); font-size: 11px; padding: 2px 2px 0; }
 
 /* ── Cancel while the AI is working ─────────────────────── */
 .agent-cancel { width: 100%; margin-top: 10px; }
